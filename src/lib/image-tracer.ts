@@ -16,6 +16,7 @@ export interface DetectedRegion {
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   area: number;
   center: Point;
+  polygon: Point[]; // simplified outline polygon in 0-100 coordinate space
 }
 
 // ─── HSL color utilities ─────────────────────────────────────────────────────
@@ -493,6 +494,127 @@ function clamp(v: number): number {
   return Math.max(0, Math.min(100, v));
 }
 
+// ─── Contour tracing (Moore neighbor tracing) ───────────────────────────────
+// Traces the outer boundary of a connected component to produce a polygon
+// outline instead of just a bounding box rectangle.
+
+function traceComponentContour(
+  labels: Int32Array,
+  rootLabel: number,
+  w: number,
+  h: number,
+  startX: number,
+  startY: number
+): Point[] {
+  // 8-neighbor directions clockwise: right, down-right, down, down-left, left, up-left, up, up-right
+  const dx = [1, 1, 0, -1, -1, -1, 0, 1];
+  const dy = [0, 1, 1, 1, 0, -1, -1, -1];
+
+  const isIn = (x: number, y: number): boolean => {
+    if (x < 0 || x >= w || y < 0 || y >= h) return false;
+    return labels[y * w + x] === rootLabel;
+  };
+
+  const dirFromTo = (fx: number, fy: number, tx: number, ty: number): number => {
+    for (let d = 0; d < 8; d++) {
+      if (dx[d] === tx - fx && dy[d] === ty - fy) return d;
+    }
+    return 0;
+  };
+
+  const sx = startX, sy = startY;
+  // Backtrack pixel: to the west of start (not in component since start is leftmost in topmost row)
+  let bx = sx - 1, by = sy;
+
+  const contour: Point[] = [];
+  let cx = sx, cy = sy;
+  const maxIter = 4 * (w + h);
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    contour.push({ x: cx, y: cy });
+
+    const bDir = dirFromTo(cx, cy, bx, by);
+    let foundX = -1, foundY = -1;
+    let prevX = bx, prevY = by;
+
+    for (let i = 0; i < 8; i++) {
+      const d = (bDir + i) % 8;
+      const nx = cx + dx[d];
+      const ny = cy + dy[d];
+      if (isIn(nx, ny)) {
+        foundX = nx;
+        foundY = ny;
+        break;
+      }
+      prevX = nx;
+      prevY = ny;
+    }
+
+    if (foundX === -1) break; // isolated pixel
+
+    bx = prevX;
+    by = prevY;
+    cx = foundX;
+    cy = foundY;
+
+    if (cx === sx && cy === sy) break;
+  }
+
+  return contour;
+}
+
+// ─── Polygon simplification (Douglas-Peucker) ──────────────────────────────
+
+function simplifyPolygon(points: Point[], tolerance: number): Point[] {
+  if (points.length <= 4) return points;
+
+  function perpDist(p: Point, a: Point, b: Point): number {
+    const lenSq = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+    if (lenSq === 0) return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2);
+    const t = Math.max(0, Math.min(1,
+      ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / lenSq
+    ));
+    const projX = a.x + t * (b.x - a.x);
+    const projY = a.y + t * (b.y - a.y);
+    return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
+  }
+
+  function rdp(start: number, end: number, keep: boolean[]): void {
+    if (end - start < 2) return;
+    let maxDist = 0;
+    let maxIdx = start;
+    for (let i = start + 1; i < end; i++) {
+      const d = perpDist(points[i], points[start], points[end]);
+      if (d > maxDist) { maxDist = d; maxIdx = i; }
+    }
+    if (maxDist > tolerance) {
+      keep[maxIdx] = true;
+      rdp(start, maxIdx, keep);
+      rdp(maxIdx, end, keep);
+    }
+  }
+
+  const keep = new Array(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+  rdp(0, points.length - 1, keep);
+
+  const result = points.filter((_, i) => keep[i]);
+
+  // Remove trailing points too close to first (closure artifact from contour tracing)
+  while (result.length > 3) {
+    const last = result[result.length - 1];
+    const first = result[0];
+    if (Math.abs(last.x - first.x) <= tolerance && Math.abs(last.y - first.y) <= tolerance) {
+      result.pop();
+    } else {
+      break;
+    }
+  }
+
+  return result;
+}
+
 // ─── Building region detection via connected components ─────────────────────
 // Instead of relying on GPT-4o to guess building positions, analyze actual
 // pixel colors to find light-gray building footprints in Google Maps screenshots.
@@ -525,6 +647,9 @@ export async function findBuildingRegions(
       mask[i] = 1;
     }
   }
+
+  // Save pre-erosion mask for expanding labels back after separation
+  const originalMask = new Uint8Array(mask);
 
   // Morphological erosion: 3 passes to separate touching buildings at higher res
   for (let pass = 0; pass < 3; pass++) {
@@ -587,17 +712,43 @@ export async function findBuildingRegions(
     }
   }
 
-  // Collect region stats
+  // Normalize labels (resolve union-find to root labels)
+  for (let i = 0; i < w * h; i++) {
+    if (labels[i] > 0) labels[i] = find(labels[i]);
+  }
+
+  // Expand labels back to original mask (undo erosion while preserving separation)
+  for (let pass = 0; pass < 3; pass++) {
+    const expanded = new Int32Array(labels);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        if (labels[idx] > 0 || originalMask[idx] === 0) continue;
+        // Only expand if all labeled neighbors agree on the same component
+        const neighborLabels = new Set<number>();
+        if (labels[idx - 1] > 0) neighborLabels.add(labels[idx - 1]);
+        if (labels[idx + 1] > 0) neighborLabels.add(labels[idx + 1]);
+        if (labels[idx - w] > 0) neighborLabels.add(labels[idx - w]);
+        if (labels[idx + w] > 0) neighborLabels.add(labels[idx + w]);
+        if (neighborLabels.size === 1) {
+          expanded[idx] = neighborLabels.values().next().value!;
+        }
+      }
+    }
+    for (let i = 0; i < w * h; i++) labels[i] = expanded[i];
+  }
+
+  // Collect region stats from expanded labels
   const regionMap = new Map<
     number,
-    { minX: number; minY: number; maxX: number; maxY: number; count: number }
+    { minX: number; minY: number; maxX: number; maxY: number; count: number; startX: number; startY: number }
   >();
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const idx = y * w + x;
       if (labels[idx] === 0) continue;
 
-      const root = find(labels[idx]);
+      const root = labels[idx];
       const r = regionMap.get(root);
       if (r) {
         r.minX = Math.min(r.minX, x);
@@ -612,18 +763,20 @@ export async function findBuildingRegions(
           maxX: x,
           maxY: y,
           count: 1,
+          startX: x,
+          startY: y,
         });
       }
     }
   }
 
-  // Filter and convert to 0-100 coordinate space
+  // Filter, trace contours, and convert to 0-100 coordinate space
   const scale = 100 / size;
-  const minPixels = 120; // ~11x11 pixel area minimum at 800px (catch smaller buildings)
-  const maxPixels = size * size * 0.04; // max 4% of image (single building)
+  const minPixels = 120;
+  const maxPixels = size * size * 0.04;
 
   const result: DetectedRegion[] = [];
-  for (const [, r] of regionMap) {
+  for (const [rootLabel, r] of regionMap) {
     if (r.count < minPixels || r.count > maxPixels) continue;
 
     const rw = r.maxX - r.minX;
@@ -639,6 +792,16 @@ export async function findBuildingRegions(
     const fill = r.count / boxArea;
     if (fill < 0.35) continue;
 
+    // Trace the actual contour outline of this component
+    const contour = traceComponentContour(labels, rootLabel, w, h, r.startX, r.startY);
+    const simplified = simplifyPolygon(contour, 2.0);
+
+    // Convert polygon to 0-100 space
+    const polygon = simplified.map(p => ({
+      x: clamp(p.x * scale),
+      y: clamp(p.y * scale),
+    }));
+
     result.push({
       bounds: {
         minX: clamp(r.minX * scale),
@@ -651,6 +814,7 @@ export async function findBuildingRegions(
         x: clamp(((r.minX + r.maxX) / 2) * scale),
         y: clamp(((r.minY + r.maxY) / 2) * scale),
       },
+      polygon,
     });
   }
 

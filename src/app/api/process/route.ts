@@ -470,29 +470,22 @@ function mergePixelAndGptBuildings(
       usedGptIndices.add(bestIdx);
     }
 
-    // Shrink pixel bounds inward by 1 unit to compensate for color bleeding
-    const inset = 1.0;
-    const adjMinX = Math.min(minX + inset, (minX + maxX) / 2);
-    const adjMinY = Math.min(minY + inset, (minY + maxY) / 2);
-    const adjMaxX = Math.max(maxX - inset, (minX + maxX) / 2);
-    let adjMaxY = Math.max(maxY - inset, (minY + maxY) / 2);
-
-    // Cap pixel building height to 10 units max (taller = likely merged)
-    if (adjMaxY - adjMinY > 10) {
-      adjMaxY = adjMinY + 10;
-    }
+    // Use traced polygon outline if available (much more accurate than bounding box)
+    const buildingPoints = region.polygon && region.polygon.length >= 3
+      ? region.polygon
+      : [
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ];
 
     usedPixelRegions.push(region);
     mergedBuildings.push({
       id: 0,
       type: "building",
       label,
-      points: [
-        { x: adjMinX, y: adjMinY },
-        { x: adjMaxX, y: adjMinY },
-        { x: adjMaxX, y: adjMaxY },
-        { x: adjMinX, y: adjMaxY },
-      ],
+      points: buildingPoints,
       cornerRadius: 0,
     });
   }
@@ -592,6 +585,11 @@ function alignBlockBuildings(buildings: Feature[]): Feature[] {
         result.push(b);
         continue;
       }
+      // Only align rectangular buildings (4 points); preserve traced polygon outlines
+      if (b.points.length > 4) {
+        result.push(b);
+        continue;
+      }
       const ys = b.points.map((p) => p.y);
       const minY = Math.min(...ys);
       const maxY = Math.max(...ys);
@@ -621,7 +619,7 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
   const openai = new OpenAI({ apiKey });
 
   // Detail level controls processing intensity
-  const gptMaxTokens = detailLevel === 1 ? 8192 : detailLevel === 3 ? 24576 : 16384;
+  const gptMaxTokens = detailLevel === 1 ? 8192 : 16384;
   const imageDetail = detailLevel === 1 ? "low" : "high";
   const skipPixelTracing = detailLevel === 1;
   const minBuildingWidth = detailLevel === 3 ? 2 : 3;
@@ -691,7 +689,7 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
   // Thresholds vary by detail level — level 3 keeps smaller features
   allFeatures = allFeatures.filter((f) => {
     if (f.type !== "building") return true;
-    if (f.points.length < 4) return false;
+    if (f.points.length < 3) return false;
     const xs = f.points.map((p) => p.x);
     const ys = f.points.map((p) => p.y);
     const w = Math.max(...xs) - Math.min(...xs);
