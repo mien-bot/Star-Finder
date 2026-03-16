@@ -539,7 +539,7 @@ function traceComponentContour(
 
   const contour: Point[] = [];
   let cx = sx, cy = sy;
-  const maxIter = 4 * (w + h);
+  const maxIter = 8 * (w + h);
 
   for (let iter = 0; iter < maxIter; iter++) {
     contour.push({ x: cx, y: cy });
@@ -848,8 +848,8 @@ export async function analyzeImagePixels(
   const origW = metadata.width || 800;
   const origH = metadata.height || 800;
 
-  // Resize preserving aspect ratio (longest side = 800px)
-  const maxDim = 800;
+  // Resize preserving aspect ratio (longest side = 1200px for higher detail)
+  const maxDim = 1200;
   const longest = Math.max(origW, origH);
   const resizeW = Math.round((origW * maxDim) / longest);
   const resizeH = Math.round((origH * maxDim) / longest);
@@ -911,6 +911,28 @@ function processBuildingMask(
   h: number,
   coordScale: number
 ): DetectedRegion[] {
+  // Morphological closing (dilate + erode) to fill small gaps/holes in building masks
+  // This smooths boundaries and connects fragmented footprints before separation
+  {
+    const dilated = new Uint8Array(w * h);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        if (mask[idx] === 1 || mask[idx - 1] === 1 || mask[idx + 1] === 1 ||
+            mask[idx - w] === 1 || mask[idx + w] === 1) {
+          dilated[idx] = 1;
+        }
+      }
+    }
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        mask[idx] = (dilated[idx] === 1 && dilated[idx - 1] === 1 && dilated[idx + 1] === 1 &&
+            dilated[idx - w] === 1 && dilated[idx + w] === 1) ? 1 : 0;
+      }
+    }
+  }
+
   const originalMask = new Uint8Array(mask);
 
   // Morphological erosion: 3 passes to separate touching buildings
@@ -976,8 +998,8 @@ function processBuildingMask(
     if (labels[i] > 0) labels[i] = find(labels[i]);
   }
 
-  // Expand labels back to original mask
-  for (let pass = 0; pass < 3; pass++) {
+  // Expand labels back to original mask (undo erosion while keeping separation)
+  for (let pass = 0; pass < 4; pass++) {
     const expanded = new Int32Array(labels);
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
@@ -1026,26 +1048,41 @@ function processBuildingMask(
   }
 
   // Filter, trace contours, convert to coordinate space
-  const minPixels = 120;
-  const maxPixels = w * h * 0.04;
+  const minPixels = 150;
+  const maxPixels = w * h * 0.06; // raised from 0.04 to allow larger buildings
   const result: DetectedRegion[] = [];
 
   for (const [rootLabel, r] of regionMap) {
     if (r.count < minPixels || r.count > maxPixels) continue;
     const rw = r.maxX - r.minX;
     const rh = r.maxY - r.minY;
-    if (rw < 5 || rh < 5) continue;
+    if (rw < 6 || rh < 6) continue;
     const aspect = Math.max(rw, rh) / Math.min(rw, rh);
-    if (aspect > 5) continue;
+    if (aspect > 6) continue;
     const fill = r.count / (rw * rh);
     if (fill < 0.35) continue;
 
-    const contour = traceComponentContour(labels, rootLabel, w, h, r.startX, r.startY);
-    const simplified = simplifyPolygon(contour, 2.0);
-    const polygon = simplified.map((p) => ({
-      x: clamp(p.x * coordScale),
-      y: clamp(p.y * coordScale),
-    }));
+    let polygon: Point[];
+
+    if (fill > 0.82) {
+      // Highly rectangular building — use clean axis-aligned rectangle
+      // This gives pixel-perfect edges for the majority of buildings
+      polygon = [
+        { x: clamp(r.minX * coordScale), y: clamp(r.minY * coordScale) },
+        { x: clamp(r.maxX * coordScale), y: clamp(r.minY * coordScale) },
+        { x: clamp(r.maxX * coordScale), y: clamp(r.maxY * coordScale) },
+        { x: clamp(r.minX * coordScale), y: clamp(r.maxY * coordScale) },
+      ];
+    } else {
+      // Complex shape (L-shaped, irregular) — trace contour with tight tolerance
+      const contour = traceComponentContour(labels, rootLabel, w, h, r.startX, r.startY);
+      const simplified = simplifyPolygon(contour, 1.0);
+      const scaled = simplified.map((p) => ({
+        x: clamp(p.x * coordScale),
+        y: clamp(p.y * coordScale),
+      }));
+      polygon = straightenEdges(scaled);
+    }
 
     result.push({
       bounds: {
@@ -1068,6 +1105,38 @@ function processBuildingMask(
     `Building detection: ${result.length} regions from ${regionMap.size} components`
   );
   return result.slice(0, 80);
+}
+
+// ─── Edge straightening ─────────────────────────────────────────────────────
+// For non-rectangular buildings: snap near-horizontal and near-vertical edges
+// to exact H/V so building walls are clean straight lines.
+
+function straightenEdges(points: Point[]): Point[] {
+  if (points.length < 3) return points;
+  const result = points.map((p) => ({ ...p }));
+  const ANGLE_THRESH = 10; // degrees from H/V to snap
+
+  for (let i = 0; i < result.length; i++) {
+    const j = (i + 1) % result.length;
+    const dx = result[j].x - result[i].x;
+    const dy = result[j].y - result[i].y;
+    const angle = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
+
+    // Near-horizontal: align y values
+    if (angle < ANGLE_THRESH || angle > (180 - ANGLE_THRESH)) {
+      const avgY = (result[i].y + result[j].y) / 2;
+      result[i].y = avgY;
+      result[j].y = avgY;
+    }
+    // Near-vertical: align x values
+    else if (Math.abs(angle - 90) < ANGLE_THRESH) {
+      const avgX = (result[i].x + result[j].x) / 2;
+      result[i].x = avgX;
+      result[j].x = avgX;
+    }
+  }
+
+  return result;
 }
 
 // ─── Street detection via projection ────────────────────────────────────────
