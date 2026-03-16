@@ -16,7 +16,18 @@ export interface DetectedRegion {
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   area: number;
   center: Point;
-  polygon: Point[]; // simplified outline polygon in 0-100 coordinate space
+  polygon: Point[]; // simplified outline polygon in coordinate space
+}
+
+export interface DetectedStreet {
+  centerline: Point[];
+  width: number;
+}
+
+export interface ImageAnalysisResult {
+  buildings: DetectedRegion[];
+  streets: DetectedStreet[];
+  viewBox: { width: number; height: number };
 }
 
 // ─── HSL color utilities ─────────────────────────────────────────────────────
@@ -823,4 +834,341 @@ export async function findBuildingRegions(
     `Building region detection: ${result.length} regions found from ${regionMap.size} components`
   );
   return result.slice(0, 80);
+}
+
+// ─── Full pixel analysis with correct aspect ratio ──────────────────────────
+// Combines building detection + street detection in a single pass.
+// Uses uniform coordinate scaling so proportions match the original image.
+
+export async function analyzeImagePixels(
+  imageBuffer: Buffer
+): Promise<ImageAnalysisResult> {
+  // Get original dimensions for aspect ratio
+  const metadata = await sharp(imageBuffer).metadata();
+  const origW = metadata.width || 800;
+  const origH = metadata.height || 800;
+
+  // Resize preserving aspect ratio (longest side = 800px)
+  const maxDim = 800;
+  const longest = Math.max(origW, origH);
+  const resizeW = Math.round((origW * maxDim) / longest);
+  const resizeH = Math.round((origH * maxDim) / longest);
+
+  const { data, info } = await sharp(imageBuffer)
+    .resize(resizeW, resizeH)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const w = info.width;
+  const h = info.height;
+
+  // Uniform scale: longest dimension maps to 100
+  const coordScale = 100 / Math.max(w, h);
+  const viewBoxW = +(w * coordScale).toFixed(2);
+  const viewBoxH = +(h * coordScale).toFixed(2);
+
+  console.log(
+    `Pixel analysis: ${origW}x${origH} → ${w}x${h}, viewBox ${viewBoxW}x${viewBoxH}`
+  );
+
+  // Classify all pixels in a single pass
+  const buildingMask = new Uint8Array(w * h);
+  const streetMask = new Uint8Array(w * h);
+
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 3];
+    const g = data[i * 3 + 1];
+    const b = data[i * 3 + 2];
+    const [hue, s, l] = rgbToHsl(r, g, b);
+
+    // Building pixels: neutral or slightly blue-tinted gray
+    const isBlueGray = hue >= 195 && hue <= 235 && s >= 5 && l < 85;
+    if (!isBlueGray && s < 18 && l >= 78 && l <= 93) {
+      buildingMask[i] = 1;
+    }
+
+    // Street pixels: blue-gray road surfaces (local + highway)
+    if (hue >= 195 && hue <= 235 && s >= 4 && s <= 30 && l >= 48 && l <= 75) {
+      streetMask[i] = 1;
+    }
+  }
+
+  // ── Process buildings ──
+  const buildings = processBuildingMask(buildingMask, w, h, coordScale);
+
+  // ── Process streets ──
+  const streets = processStreetMask(streetMask, w, h, coordScale, viewBoxW, viewBoxH);
+
+  return { buildings, streets, viewBox: { width: viewBoxW, height: viewBoxH } };
+}
+
+// ─── Building mask processing (erosion, labeling, contour tracing) ──────────
+
+function processBuildingMask(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  coordScale: number
+): DetectedRegion[] {
+  const originalMask = new Uint8Array(mask);
+
+  // Morphological erosion: 3 passes to separate touching buildings
+  for (let pass = 0; pass < 3; pass++) {
+    const eroded = new Uint8Array(w * h);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        if (
+          mask[idx] === 1 &&
+          mask[idx - 1] === 1 &&
+          mask[idx + 1] === 1 &&
+          mask[idx - w] === 1 &&
+          mask[idx + w] === 1
+        ) {
+          eroded[idx] = 1;
+        }
+      }
+    }
+    for (let i = 0; i < w * h; i++) mask[i] = eroded[i];
+  }
+
+  // Connected component labeling (4-connectivity with union-find)
+  const labels = new Int32Array(w * h);
+  let nextLabel = 1;
+  const parentArr: number[] = [0];
+
+  function find(x: number): number {
+    while (parentArr[x] !== x) {
+      parentArr[x] = parentArr[parentArr[x]];
+      x = parentArr[x];
+    }
+    return x;
+  }
+
+  function union(a: number, b: number) {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parentArr[rb] = ra;
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (mask[idx] === 0) continue;
+      const neighbors: number[] = [];
+      if (x > 0 && labels[idx - 1] > 0) neighbors.push(labels[idx - 1]);
+      if (y > 0 && labels[idx - w] > 0) neighbors.push(labels[idx - w]);
+      if (neighbors.length === 0) {
+        labels[idx] = nextLabel;
+        parentArr.push(nextLabel);
+        nextLabel++;
+      } else {
+        const minLabel = Math.min(...neighbors);
+        labels[idx] = minLabel;
+        for (const n of neighbors) union(minLabel, n);
+      }
+    }
+  }
+
+  // Normalize labels
+  for (let i = 0; i < w * h; i++) {
+    if (labels[i] > 0) labels[i] = find(labels[i]);
+  }
+
+  // Expand labels back to original mask
+  for (let pass = 0; pass < 3; pass++) {
+    const expanded = new Int32Array(labels);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        if (labels[idx] > 0 || originalMask[idx] === 0) continue;
+        const neighborLabels = new Set<number>();
+        if (labels[idx - 1] > 0) neighborLabels.add(labels[idx - 1]);
+        if (labels[idx + 1] > 0) neighborLabels.add(labels[idx + 1]);
+        if (labels[idx - w] > 0) neighborLabels.add(labels[idx - w]);
+        if (labels[idx + w] > 0) neighborLabels.add(labels[idx + w]);
+        if (neighborLabels.size === 1) {
+          expanded[idx] = neighborLabels.values().next().value!;
+        }
+      }
+    }
+    for (let i = 0; i < w * h; i++) labels[i] = expanded[i];
+  }
+
+  // Collect region stats
+  const regionMap = new Map<
+    number,
+    {
+      minX: number; minY: number; maxX: number; maxY: number;
+      count: number; startX: number; startY: number;
+    }
+  >();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (labels[idx] === 0) continue;
+      const root = labels[idx];
+      const r = regionMap.get(root);
+      if (r) {
+        r.minX = Math.min(r.minX, x);
+        r.minY = Math.min(r.minY, y);
+        r.maxX = Math.max(r.maxX, x);
+        r.maxY = Math.max(r.maxY, y);
+        r.count++;
+      } else {
+        regionMap.set(root, {
+          minX: x, minY: y, maxX: x, maxY: y,
+          count: 1, startX: x, startY: y,
+        });
+      }
+    }
+  }
+
+  // Filter, trace contours, convert to coordinate space
+  const minPixels = 120;
+  const maxPixels = w * h * 0.04;
+  const result: DetectedRegion[] = [];
+
+  for (const [rootLabel, r] of regionMap) {
+    if (r.count < minPixels || r.count > maxPixels) continue;
+    const rw = r.maxX - r.minX;
+    const rh = r.maxY - r.minY;
+    if (rw < 5 || rh < 5) continue;
+    const aspect = Math.max(rw, rh) / Math.min(rw, rh);
+    if (aspect > 5) continue;
+    const fill = r.count / (rw * rh);
+    if (fill < 0.35) continue;
+
+    const contour = traceComponentContour(labels, rootLabel, w, h, r.startX, r.startY);
+    const simplified = simplifyPolygon(contour, 2.0);
+    const polygon = simplified.map((p) => ({
+      x: clamp(p.x * coordScale),
+      y: clamp(p.y * coordScale),
+    }));
+
+    result.push({
+      bounds: {
+        minX: clamp(r.minX * coordScale),
+        minY: clamp(r.minY * coordScale),
+        maxX: clamp(r.maxX * coordScale),
+        maxY: clamp(r.maxY * coordScale),
+      },
+      area: r.count,
+      center: {
+        x: clamp(((r.minX + r.maxX) / 2) * coordScale),
+        y: clamp(((r.minY + r.maxY) / 2) * coordScale),
+      },
+      polygon,
+    });
+  }
+
+  result.sort((a, b) => b.area - a.area);
+  console.log(
+    `Building detection: ${result.length} regions from ${regionMap.size} components`
+  );
+  return result.slice(0, 80);
+}
+
+// ─── Street detection via projection ────────────────────────────────────────
+// Projects street pixels onto x-axis (vertical streets) and y-axis (horizontal)
+// to find centerlines and widths without GPT-4o.
+
+function processStreetMask(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  coordScale: number,
+  viewBoxW: number,
+  viewBoxH: number
+): DetectedStreet[] {
+  const streets: DetectedStreet[] = [];
+
+  // Vertical streets: count street pixels per column
+  const xProj = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    let count = 0;
+    for (let y = 0; y < h; y++) {
+      if (mask[y * w + x] === 1) count++;
+    }
+    xProj[x] = count / h;
+  }
+
+  for (const peak of findProjectionPeaks(xProj, 0.25, 8)) {
+    const cx = peak.center * coordScale;
+    const sw = Math.max(2, Math.min(12, peak.width * coordScale));
+    streets.push({
+      centerline: [
+        { x: clamp(cx), y: 0 },
+        { x: clamp(cx), y: viewBoxH },
+      ],
+      width: sw,
+    });
+  }
+
+  // Horizontal streets: count street pixels per row
+  const yProj = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let count = 0;
+    for (let x = 0; x < w; x++) {
+      if (mask[y * w + x] === 1) count++;
+    }
+    yProj[y] = count / w;
+  }
+
+  for (const peak of findProjectionPeaks(yProj, 0.25, 8)) {
+    const cy = peak.center * coordScale;
+    const sw = Math.max(2, Math.min(12, peak.width * coordScale));
+    streets.push({
+      centerline: [
+        { x: 0, y: clamp(cy) },
+        { x: viewBoxW, y: clamp(cy) },
+      ],
+      width: sw,
+    });
+  }
+
+  console.log(`Street detection: ${streets.length} streets found`);
+  return streets;
+}
+
+function findProjectionPeaks(
+  projection: Float32Array,
+  threshold: number,
+  minWidth: number
+): Array<{ center: number; width: number }> {
+  const peaks: Array<{ center: number; width: number }> = [];
+  let inPeak = false;
+  let peakStart = 0;
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (let i = 0; i <= projection.length; i++) {
+    const val = i < projection.length ? projection[i] : 0;
+
+    if (val >= threshold && !inPeak) {
+      inPeak = true;
+      peakStart = i;
+      weightedSum = 0;
+      totalWeight = 0;
+    }
+
+    if (inPeak && val >= threshold) {
+      weightedSum += i * val;
+      totalWeight += val;
+    }
+
+    if (inPeak && (val < threshold || i === projection.length)) {
+      const width = i - peakStart;
+      if (width >= minWidth) {
+        peaks.push({
+          center: totalWeight > 0 ? weightedSum / totalWeight : peakStart + width / 2,
+          width,
+        });
+      }
+      inPeak = false;
+    }
+  }
+
+  return peaks;
 }
