@@ -75,14 +75,18 @@ hylo-sp/
 - [x] Download button for SVG
 
 ### Phase 2: Blender Integration
-- [ ] SVG to 3D model conversion
-- [ ] Automated camera positioning
-- [ ] Material/texture application
+- [x] SVG to 3D model conversion (Three.js browser preview)
+- [x] bpy script generation for Blender
+- [x] Automated camera positioning
+- [x] Material/texture application
 
 ### Phase 3: Polish
-- [ ] Multiple drawing styles
-- [ ] Export to DWG/DXF
-- [ ] Batch processing
+- [x] Multiple rendering styles (5 styles)
+- [x] Export to SVG, DXF, PDF, PNG, Blender
+- [x] Style selector UI
+- [x] Building label editor
+- [x] Dimensions, north arrow, scale bar overlays
+- [x] Lot size configuration
 
 ## License
 
