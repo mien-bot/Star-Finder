@@ -1094,7 +1094,24 @@ function processStreetMask(
     xProj[x] = count / h;
   }
 
-  for (const peak of findProjectionPeaks(xProj, 0.25, 8)) {
+  // Also measure continuity: longest contiguous run of street pixels per column
+  const xContinuity = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    let maxRun = 0, run = 0;
+    for (let y = 0; y < h; y++) {
+      if (mask[y * w + x] === 1) { run++; maxRun = Math.max(maxRun, run); }
+      else run = 0;
+    }
+    xContinuity[x] = maxRun / h;
+  }
+
+  // Higher threshold (0.4 = 40% of column must be street pixels)
+  // Plus continuity check: longest run must be >30% of height (real streets are continuous)
+  for (const peak of findProjectionPeaks(xProj, 0.4, 10)) {
+    // Check continuity at the peak center
+    const centerCol = Math.round(peak.center);
+    if (centerCol >= 0 && centerCol < w && xContinuity[centerCol] < 0.3) continue;
+
     const cx = peak.center * coordScale;
     const sw = Math.max(2, Math.min(12, peak.width * coordScale));
     streets.push({
@@ -1116,7 +1133,20 @@ function processStreetMask(
     yProj[y] = count / w;
   }
 
-  for (const peak of findProjectionPeaks(yProj, 0.25, 8)) {
+  const yContinuity = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let maxRun = 0, run = 0;
+    for (let x = 0; x < w; x++) {
+      if (mask[y * w + x] === 1) { run++; maxRun = Math.max(maxRun, run); }
+      else run = 0;
+    }
+    yContinuity[y] = maxRun / w;
+  }
+
+  for (const peak of findProjectionPeaks(yProj, 0.4, 10)) {
+    const centerRow = Math.round(peak.center);
+    if (centerRow >= 0 && centerRow < h && yContinuity[centerRow] < 0.3) continue;
+
     const cy = peak.center * coordScale;
     const sw = Math.max(2, Math.min(12, peak.width * coordScale));
     streets.push({

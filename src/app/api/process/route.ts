@@ -395,25 +395,25 @@ function featuresToSvg(
         );
       const colors = isHighway ? streetColors.highway : streetColors.local;
 
-      // Outer border (shadow)
+      // Outer border (shadow) — butt linecap so streets have flat ends at viewport edges
       featureSvgs.push(
-        `<path d="${pathD}" fill="none" stroke="${colors.border}" stroke-width="${(feature.width || 5) + 0.6}" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"/>`
+        `<path d="${pathD}" fill="none" stroke="${colors.border}" stroke-width="${(feature.width || 5) + 0.6}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.4"/>`
       );
       // Main road surface
       featureSvgs.push(
-        `<path d="${pathD}" fill="none" stroke="${colors.fill}" stroke-width="${feature.width || 5}" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`
+        `<path d="${pathD}" fill="none" stroke="${colors.fill}" stroke-width="${feature.width || 5}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.95"/>`
       );
 
       // Yellow center line dashes for local roads (like Google Maps)
       if ((feature.width || 0) >= 4 && !isHighway) {
         featureSvgs.push(
-          `<path d="${pathD}" fill="none" stroke="#e8c840" stroke-width="0.2" stroke-linecap="round" stroke-dasharray="1.2,0.8" opacity="0.5"/>`
+          `<path d="${pathD}" fill="none" stroke="#e8c840" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.2,0.8" opacity="0.5"/>`
         );
       }
       // White lane dashes for highways
       if (isHighway && (feature.width || 0) >= 6) {
         featureSvgs.push(
-          `<path d="${pathD}" fill="none" stroke="#ffffff" stroke-width="0.2" stroke-linecap="round" stroke-dasharray="1.5,1" opacity="0.5"/>`
+          `<path d="${pathD}" fill="none" stroke="#ffffff" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.5,1" opacity="0.5"/>`
         );
       }
 
