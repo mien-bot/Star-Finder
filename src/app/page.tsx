@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Upload, Image as ImageIcon, Download, Loader2, AlertCircle, Box, Grid3X3, FileDown, Palette, Ruler, MapPin, Tag, X, Plus, Move } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Loader2, AlertCircle, Box, Grid3X3, FileDown, Palette, Tag, X, SlidersHorizontal } from "lucide-react";
 import * as THREE from "three";
 
 interface ProcessingResult {
@@ -11,6 +11,13 @@ interface ProcessingResult {
     points: Array<{ x: number; y: number }>;
     name?: string;
   }>;
+  features?: Array<{
+    id: number;
+    type: string;
+    label?: string;
+  }>;
+  message?: string;
+  tracingUsed?: boolean;
 }
 
 interface BlenderResult {
@@ -61,8 +68,11 @@ export default function Home() {
   const [includeNorthArrow, setIncludeNorthArrow] = useState(true);
   const [includeScaleBar, setIncludeScaleBar] = useState(true);
   const [includeLabels, setIncludeLabels] = useState(true);
-  const [lotSize, setLotSize] = useState({ width: 100, depth: 100 });
-  
+  const [detailLevel, setDetailLevel] = useState(2); // 1=Low, 2=Medium, 3=High
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState(false);
+
   const threeContainerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -110,9 +120,10 @@ export default function Home() {
       const response = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           image: image,
-          source: imageFile ? "upload" : "url"
+          source: imageFile ? "upload" : "url",
+          detailLevel,
         }),
       });
       
@@ -124,12 +135,15 @@ export default function Home() {
       const data = await response.json();
       setResult(data);
       setEditedBuildings(data.buildings);
+      if (data.buildings && data.buildings.length === 0) {
+        setError("No buildings detected. For best results, use a satellite or aerial image with visible rooftops.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setIsProcessing(false);
     }
-  }, [image, imageFile]);
+  }, [image, imageFile, detailLevel]);
 
   const handleGenerate3D = useCallback(async () => {
     const buildings = editedBuildings || result?.buildings;
@@ -144,7 +158,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           buildings: buildings,
-          lotSize,
+          lotSize: { width: 100, depth: 100 },
           style: renderStyle === "bw" ? "minimal" : renderStyle
         }),
       });
@@ -161,7 +175,7 @@ export default function Home() {
     } finally {
       setIsLoading3D(false);
     }
-  }, [result, editedBuildings, lotSize, renderStyle]);
+  }, [result, editedBuildings, renderStyle]);
 
   const handleExport = useCallback(async () => {
     const buildings = editedBuildings || result?.buildings;
@@ -176,7 +190,8 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           buildings: buildings,
-          lotSize,
+          features: result?.features || [],
+          lotSize: { width: 100, depth: 100 },
           style: renderStyle,
           format: exportFormat,
           includeDimensions,
@@ -186,18 +201,22 @@ export default function Home() {
           scale: 50
         }),
       });
-      
+
       if (!response.ok) {
         const data = await response.json();
         throw new Error(data.error || "Failed to generate export");
       }
-      
+
       const data = await response.json();
-      
-      // Download the file
-      const blob = new Blob([data.content], { 
-        type: data.contentType 
-      });
+
+      // Handle binary content (PNG) vs text content (SVG, DXF)
+      let blob: Blob;
+      if (data.content.startsWith("data:")) {
+        const res = await fetch(data.content);
+        blob = await res.blob();
+      } else {
+        blob = new Blob([data.content], { type: data.contentType });
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -211,7 +230,7 @@ export default function Home() {
     } finally {
       setIsExporting(false);
     }
-  }, [result, editedBuildings, lotSize, renderStyle, exportFormat, includeDimensions, includeNorthArrow, includeScaleBar, includeLabels]);
+  }, [result, editedBuildings, renderStyle, exportFormat, includeDimensions, includeNorthArrow, includeScaleBar, includeLabels]);
 
   const handleDownload = useCallback(() => {
     if (!result?.svg) return;
@@ -348,6 +367,53 @@ export default function Home() {
 
   const buildings = editedBuildings || result?.buildings;
 
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center">
+        <div className="w-full max-w-sm rounded-xl border bg-white p-8 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
+          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50 text-center mb-6">
+            HYLO-SP
+          </h1>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (passwordInput === "hylo") {
+                setIsAuthenticated(true);
+                setPasswordError(false);
+              } else {
+                setPasswordError(true);
+              }
+            }}
+            className="space-y-4"
+          >
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                Password
+              </label>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => { setPasswordInput(e.target.value); setPasswordError(false); }}
+                placeholder="Enter password"
+                autoFocus
+                className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {passwordError && (
+                <p className="mt-1 text-xs text-red-500">Incorrect password</p>
+              )}
+            </div>
+            <button
+              type="submit"
+              className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Enter
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <header className="border-b bg-white dark:bg-zinc-900 px-6 py-4">
@@ -440,32 +506,31 @@ export default function Home() {
               )}
             </div>
 
-            {/* Lot Size Input */}
+            {/* Detail Level */}
             <div className="rounded-xl border bg-white p-4 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
               <h3 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
-                <MapPin className="h-4 w-4" />
-                Lot Size (meters)
+                <SlidersHorizontal className="h-4 w-4" />
+                Detail Level
               </h3>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs text-zinc-500">Width</label>
-                  <input
-                    type="number"
-                    value={lotSize.width}
-                    onChange={(e) => setLotSize({ ...lotSize, width: Number(e.target.value) })}
-                    className="w-full rounded-lg border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-                  />
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs text-zinc-500">Depth</label>
-                  <input
-                    type="number"
-                    value={lotSize.depth}
-                    onChange={(e) => setLotSize({ ...lotSize, depth: Number(e.target.value) })}
-                    className="w-full rounded-lg border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-                  />
-                </div>
+              <input
+                type="range"
+                min={1}
+                max={3}
+                step={1}
+                value={detailLevel}
+                onChange={(e) => setDetailLevel(Number(e.target.value))}
+                className="w-full accent-blue-600"
+              />
+              <div className="flex justify-between text-xs text-zinc-500 mt-1">
+                <span>Low</span>
+                <span>Medium</span>
+                <span>High</span>
               </div>
+              <p className="text-xs text-zinc-400 mt-2">
+                {detailLevel === 1 && "Fast processing, major features only"}
+                {detailLevel === 2 && "Balanced detail and speed"}
+                {detailLevel === 3 && "Maximum detail, slower processing"}
+              </p>
             </div>
 
             {/* Process Button */}
@@ -749,19 +814,28 @@ export default function Home() {
               )}
             </div>
 
-            {/* Building Info */}
-            {buildings && buildings.length > 0 && (
+            {/* Feature Summary */}
+            {result && (
               <div className="rounded-xl border bg-white p-4 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
-                <h3 className="mb-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                  Detected Buildings ({buildings.length})
-                </h3>
-                <ul className="space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  {buildings.map((b) => (
-                    <li key={b.id}>
-                      {b.name || `Building ${b.id}`}: {b.points.length} vertices
-                    </li>
-                  ))}
-                </ul>
+                {result.message && (
+                  <p className="mb-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    {result.message}
+                  </p>
+                )}
+                {buildings && buildings.length > 0 && (
+                  <>
+                    <h3 className="mb-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                      Detected Buildings ({buildings.length})
+                    </h3>
+                    <ul className="space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      {buildings.map((b) => (
+                        <li key={b.id}>
+                          {b.name || `Building ${b.id}`}: {b.points.length} vertices
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
               </div>
             )}
           </div>
