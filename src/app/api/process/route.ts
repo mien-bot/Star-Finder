@@ -7,31 +7,10 @@ import {
   DetectedStreet,
   ImageAnalysisResult,
 } from "@/lib/image-tracer";
+import { Point, Feature, clamp, centerlineToPolygon, computeParcels } from "@/lib/geometry";
+import { featuresToSvg } from "@/lib/svg-renderer";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-interface Point {
-  x: number;
-  y: number;
-}
-
-interface Feature {
-  id: number;
-  type:
-    | "building"
-    | "parcel"
-    | "street"
-    | "sidewalk"
-    | "vegetation"
-    | "water"
-    | "parking";
-  label?: string;
-  points: Point[];
-  cornerRadius?: number;
-  centerline?: Point[];
-  width?: number;
-  svgPath?: string;
-}
 
 interface SitePlanData {
   features: Feature[];
