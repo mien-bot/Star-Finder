@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     const result = await fetchOsmSitePlan(coords.lat, coords.lng, clampedRadius);
 
     // Render SVG
-    const svg = featuresToSvg(result.features, result.viewBox);
+    const svg = featuresToSvg(result.features, result.viewBox, { showOsmAttribution: true });
 
     const featureCounts = result.features.reduce(
       (acc, f) => {
