@@ -128,7 +128,8 @@ function getGoogleMapsClassifiers(): ColorClassifier[] {
         const isBlueGray = h >= 195 && h <= 235 && s >= 5 && l < 85;
         const isGray = !isBlueGray && s < 18 && l >= 82 && l <= 93;
         // Yellow/cream highlighted parcels (Google Maps selected buildings)
-        const isYellow = h >= 20 && h <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+        // Widened to catch all highlight variations
+        const isYellow = h >= 15 && h <= 65 && s >= 8 && l >= 78 && l <= 98;
         return isGray || isYellow;
       },
       turdSize: 4,
@@ -386,7 +387,7 @@ export async function analyzeColors(
     else if (s < 18 && l >= 82 && l <= 93)
       likelyType = "building (light gray footprint)";
     // Yellow/cream highlighted buildings (Google Maps selected parcels)
-    else if (h >= 20 && h <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96)
+    else if (h >= 15 && h <= 65 && s >= 8 && l >= 78 && l <= 98)
       likelyType = "building (yellow/cream highlighted)";
     // Very light land background
     else if (s < 8 && l > 93)
@@ -657,7 +658,7 @@ export async function findBuildingRegions(
     const [hue, s, l] = rgbToHsl(r, g, b);
     const isBlueGray = hue >= 195 && hue <= 235 && s >= 5 && l < 85;
     const isGrayBuilding = !isBlueGray && s < 18 && l >= 78 && l <= 93;
-    const isYellowBuilding = hue >= 20 && hue <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+    const isYellowBuilding = hue >= 15 && hue <= 65 && s >= 8 && l >= 78 && l <= 98;
     if (isGrayBuilding || isYellowBuilding) {
       mask[i] = 1;
     }
@@ -879,6 +880,8 @@ export async function analyzeImagePixels(
   // Classify all pixels in a single pass
   const buildingMask = new Uint8Array(w * h);
   const streetMask = new Uint8Array(w * h);
+  let grayBuildingCount = 0;
+  let yellowBuildingCount = 0;
 
   for (let i = 0; i < w * h; i++) {
     const r = data[i * 3];
@@ -894,12 +897,15 @@ export async function analyzeImagePixels(
     const isGrayBuilding = !isBlueGray && s < 18 && l >= 78 && l <= 93;
     //
     // 2. Yellow/cream highlighted parcels: Google Maps "selected" buildings
-    //    ~RGB(248,238,218) HSL(25-50°, 20-90%, 85-96%)
-    //    These appear when a business or POI is highlighted on the map.
-    const isYellowBuilding = hue >= 20 && hue <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+    //    These can range from warm cream (~HSL 30°, 30%, 93%) to bright yellow (~HSL 50°, 100%, 96%)
+    //    Widened ranges to catch all Google Maps highlight variations:
+    //    H: 15-65° (warm yellow/orange range), S: 8-100%, L: 78-98%
+    const isYellowBuilding = hue >= 15 && hue <= 65 && s >= 8 && l >= 78 && l <= 98;
 
     if (isGrayBuilding || isYellowBuilding) {
       buildingMask[i] = 1;
+      if (isGrayBuilding) grayBuildingCount++;
+      if (isYellowBuilding) yellowBuildingCount++;
     }
 
     // Street pixels: blue-gray road surfaces (local + highway)
@@ -907,6 +913,10 @@ export async function analyzeImagePixels(
       streetMask[i] = 1;
     }
   }
+
+  console.log(
+    `Pixel classification: ${grayBuildingCount} gray building pixels (${((grayBuildingCount / (w * h)) * 100).toFixed(1)}%), ${yellowBuildingCount} yellow building pixels (${((yellowBuildingCount / (w * h)) * 100).toFixed(1)}%)`
+  );
 
   // ── Process buildings ──
   const buildings = processBuildingMask(buildingMask, w, h, coordScale);
@@ -1063,18 +1073,26 @@ function processBuildingMask(
 
   // Filter, trace contours, convert to coordinate space
   const minPixels = 150;
-  const maxPixels = w * h * 0.15; // allow large buildings (highlighted parcels can be ~12% of image)
+  const maxPixels = w * h * 0.30; // allow very large buildings (highlighted parcels can be 20%+ of image)
   const result: DetectedRegion[] = [];
 
+  console.log(`Building filter: ${regionMap.size} components, maxPixels=${maxPixels}`);
+  let filteredCount = { tooSmall: 0, tooLarge: 0, tooThin: 0, badAspect: 0, lowFill: 0 };
+
   for (const [rootLabel, r] of regionMap) {
-    if (r.count < minPixels || r.count > maxPixels) continue;
+    if (r.count < minPixels) { filteredCount.tooSmall++; continue; }
+    if (r.count > maxPixels) {
+      console.log(`  Filtered LARGE component: ${r.count} pixels (${((r.count / (w * h)) * 100).toFixed(1)}%), bounds ${r.minX},${r.minY} → ${r.maxX},${r.maxY}`);
+      filteredCount.tooLarge++;
+      continue;
+    }
     const rw = r.maxX - r.minX;
     const rh = r.maxY - r.minY;
-    if (rw < 6 || rh < 6) continue;
+    if (rw < 6 || rh < 6) { filteredCount.tooThin++; continue; }
     const aspect = Math.max(rw, rh) / Math.min(rw, rh);
-    if (aspect > 6) continue;
+    if (aspect > 8) { filteredCount.badAspect++; continue; }
     const fill = r.count / (rw * rh);
-    if (fill < 0.35) continue;
+    if (fill < 0.30) { filteredCount.lowFill++; continue; }
 
     let polygon: Point[];
 
@@ -1116,7 +1134,7 @@ function processBuildingMask(
 
   result.sort((a, b) => b.area - a.area);
   console.log(
-    `Building detection: ${result.length} regions from ${regionMap.size} components`
+    `Building detection: ${result.length} regions from ${regionMap.size} components (filtered: ${JSON.stringify(filteredCount)})`
   );
   return result.slice(0, 80);
 }
