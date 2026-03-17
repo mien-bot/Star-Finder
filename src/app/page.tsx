@@ -43,9 +43,12 @@ type RenderStyle = "realistic" | "blueprint" | "minimal" | "architectural" | "bw
 type ExportFormat = "svg" | "dxf" | "png" | "pdf" | "blend";
 
 export default function Home() {
+  const [inputMode, setInputMode] = useState<"image" | "address">("image");
   const [image, setImage] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [urlInput, setUrlInput] = useState("");
+  const [addressInput, setAddressInput] = useState("");
+  const [radiusInput, setRadiusInput] = useState(200);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isLoading3D, setIsLoading3D] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -109,7 +112,8 @@ export default function Home() {
   }, [urlInput]);
 
   const handleProcess = useCallback(async () => {
-    if (!image) return;
+    if (inputMode === "image" && !image) return;
+    if (inputMode === "address" && !addressInput.trim()) return;
     
     setIsProcessing(true);
     setError(null);
@@ -117,33 +121,56 @@ export default function Home() {
     setEditedBuildings(null);
     
     try {
-      const response = await fetch("/api/process", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image: image,
-          source: imageFile ? "upload" : "url",
-          detailLevel,
-        }),
-      });
+      let response;
+      
+      if (inputMode === "address") {
+        // Check if input looks like coordinates (lat, lng)
+        const coordMatch = addressInput.trim().match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
+        
+        if (coordMatch) {
+          const lat = parseFloat(coordMatch[1]);
+          const lng = parseFloat(coordMatch[2]);
+          response = await fetch("/api/overpass", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lat, lng, radius: radiusInput }),
+          });
+        } else {
+          response = await fetch("/api/overpass", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address: addressInput.trim(), radius: radiusInput }),
+          });
+        }
+      } else {
+        response = await fetch("/api/process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: image,
+            source: imageFile ? "upload" : "url",
+            detailLevel,
+          }),
+        });
+      }
       
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || "Failed to process image");
+        throw new Error(data.error || "Failed to process");
       }
       
       const data = await response.json();
       setResult(data);
       setEditedBuildings(data.buildings);
       if (data.buildings && data.buildings.length === 0) {
-        setError("No buildings detected. For best results, use a satellite or aerial image with visible rooftops.");
+        setError("No buildings detected. Try adjusting the radius or a different location.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setIsProcessing(false);
     }
-  }, [image, imageFile, detailLevel]);
+  }, [inputMode, image, imageFile, detailLevel, addressInput, radiusInput]);
 
   const handleGenerate3D = useCallback(async () => {
     const buildings = editedBuildings || result?.buildings;
@@ -257,6 +284,8 @@ export default function Home() {
     setImage(null);
     setImageFile(null);
     setUrlInput("");
+    setAddressInput("");
+    setRadiusInput(200);
     setResult(null);
     setBlenderResult(null);
     setEditedBuildings(null);
@@ -437,9 +466,32 @@ export default function Home() {
           {/* Left Panel - Input */}
           <div className="space-y-6">
             <div className="rounded-xl border bg-white p-6 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
+              {/* Mode Toggle */}
+              <div className="flex gap-2 mb-4">
+                <button 
+                  onClick={() => setInputMode("image")}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                    inputMode === "image" ? "bg-blue-600 text-white" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                  }`}
+                >
+                  Image Upload
+                </button>
+                <button 
+                  onClick={() => setInputMode("address")}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                    inputMode === "address" ? "bg-blue-600 text-white" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                  }`}
+                >
+                  Address Lookup
+                </button>
+              </div>
+              
               <h2 className="mb-4 text-lg font-medium text-zinc-900 dark:text-zinc-50">
-                1. Upload Image
+                1. {inputMode === "image" ? "Upload Image" : "Enter Address"}
               </h2>
+              
+              {inputMode === "image" ? (
+                <>
               
               {!image ? (
                 <div className="space-y-4">
@@ -504,9 +556,59 @@ export default function Home() {
                   </button>
                 </div>
               )}
+            </>
+              ) : (
+                /* Address Lookup Mode */
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      Address or coordinates
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 1600 Pennsylvania Ave NW, Washington DC or 41.8781, -87.6298"
+                      value={addressInput}
+                      onChange={(e) => setAddressInput(e.target.value)}
+                      className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                    />
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Enter a street address or coordinates (lat, lng)
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      Search radius: {radiusInput}m
+                    </label>
+                    <input
+                      type="range"
+                      min={50}
+                      max={500}
+                      step={10}
+                      value={radiusInput}
+                      onChange={(e) => setRadiusInput(Number(e.target.value))}
+                      className="w-full accent-blue-600"
+                    />
+                    <div className="flex justify-between text-xs text-zinc-400 mt-1">
+                      <span>50m</span>
+                      <span>500m</span>
+                    </div>
+                  </div>
+                  
+                  {addressInput && (
+                    <button
+                      onClick={clearAll}
+                      className="text-sm text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                    >
+                      ← Clear address
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Detail Level */}
+            {/* Detail Level - only for image mode */}
+            {inputMode === "image" && (
             <div className="rounded-xl border bg-white p-4 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
               <h3 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
                 <SlidersHorizontal className="h-4 w-4" />
@@ -532,11 +634,12 @@ export default function Home() {
                 {detailLevel === 3 && "Maximum detail, slower processing"}
               </p>
             </div>
+            )}
 
             {/* Process Button */}
             <button
               onClick={handleProcess}
-              disabled={!image || isProcessing}
+              disabled={(inputMode === "image" ? !image : !addressInput.trim()) || isProcessing}
               className="w-full rounded-lg bg-blue-600 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isProcessing ? (
