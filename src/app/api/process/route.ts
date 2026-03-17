@@ -175,8 +175,8 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
     .filter((r) => {
       const bw = r.bounds.maxX - r.bounds.minX;
       const bh = r.bounds.maxY - r.bounds.minY;
-      // Skip very large merged regions (likely a whole block, not a building)
-      if (bw > 25 && bh > 25) return false;
+      // Skip extremely large merged regions (likely a whole block, not a building)
+      if (bw > 40 && bh > 40) return false;
       if (bw < minBuildingWidth || bh < minBuildingHeight) return false;
       return true;
     })

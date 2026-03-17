@@ -121,13 +121,15 @@ function getGoogleMapsClassifiers(): ColorClassifier[] {
     },
     {
       type: "building",
-      description: "Building footprints (light gray, possibly blue-tinted)",
+      description: "Building footprints (gray + yellow/cream highlighted)",
       match: (r, g, b) => {
         const [h, s, l] = rgbToHsl(r, g, b);
-        // Buildings: near-neutral or slightly blue-tinted gray at high lightness
-        // Only exclude blue-gray if dark enough to be actual road surface (L < 85)
+        // Gray buildings: near-neutral or slightly blue-tinted gray
         const isBlueGray = h >= 195 && h <= 235 && s >= 5 && l < 85;
-        return !isBlueGray && s < 18 && l >= 82 && l <= 93;
+        const isGray = !isBlueGray && s < 18 && l >= 82 && l <= 93;
+        // Yellow/cream highlighted parcels (Google Maps selected buildings)
+        const isYellow = h >= 20 && h <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+        return isGray || isYellow;
       },
       turdSize: 4,
     },
@@ -383,6 +385,9 @@ export async function analyzeColors(
     // Building footprints (neutral or slightly blue-tinted gray at high lightness)
     else if (s < 18 && l >= 82 && l <= 93)
       likelyType = "building (light gray footprint)";
+    // Yellow/cream highlighted buildings (Google Maps selected parcels)
+    else if (h >= 20 && h <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96)
+      likelyType = "building (yellow/cream highlighted)";
     // Very light land background
     else if (s < 8 && l > 93)
       likelyType = "background (land)";
@@ -643,18 +648,17 @@ export async function findBuildingRegions(
   const w = info.width;
   const h = info.height;
 
-  // Create building mask — same classifier as tracing
+  // Create building mask — gray + yellow/cream highlighted buildings
   const mask = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) {
     const r = data[i * 3];
     const g = data[i * 3 + 1];
     const b = data[i * 3 + 2];
     const [hue, s, l] = rgbToHsl(r, g, b);
-    // Building pixels: neutral or slightly blue-tinted gray, NOT actual road surfaces
-    // Only exclude as blue-gray if dark enough to be a road (L < 85)
-    // Buildings often have a slight blue tint at high lightness (L ≈ 88-93)
     const isBlueGray = hue >= 195 && hue <= 235 && s >= 5 && l < 85;
-    if (!isBlueGray && s < 18 && l >= 78 && l <= 93) {
+    const isGrayBuilding = !isBlueGray && s < 18 && l >= 78 && l <= 93;
+    const isYellowBuilding = hue >= 20 && hue <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+    if (isGrayBuilding || isYellowBuilding) {
       mask[i] = 1;
     }
   }
@@ -784,7 +788,7 @@ export async function findBuildingRegions(
   // Filter, trace contours, and convert to 0-100 coordinate space
   const scale = 100 / size;
   const minPixels = 120;
-  const maxPixels = size * size * 0.04;
+  const maxPixels = size * size * 0.15;
 
   const result: DetectedRegion[] = [];
   for (const [rootLabel, r] of regionMap) {
@@ -882,9 +886,19 @@ export async function analyzeImagePixels(
     const b = data[i * 3 + 2];
     const [hue, s, l] = rgbToHsl(r, g, b);
 
-    // Building pixels: neutral or slightly blue-tinted gray
+    // Building pixels — two color profiles:
+    //
+    // 1. Gray footprints: neutral or slightly blue-tinted gray (most buildings)
+    //    ~RGB(220,220,220) HSL(0°, 0-18%, 78-93%)
     const isBlueGray = hue >= 195 && hue <= 235 && s >= 5 && l < 85;
-    if (!isBlueGray && s < 18 && l >= 78 && l <= 93) {
+    const isGrayBuilding = !isBlueGray && s < 18 && l >= 78 && l <= 93;
+    //
+    // 2. Yellow/cream highlighted parcels: Google Maps "selected" buildings
+    //    ~RGB(248,238,218) HSL(25-50°, 20-90%, 85-96%)
+    //    These appear when a business or POI is highlighted on the map.
+    const isYellowBuilding = hue >= 20 && hue <= 55 && s >= 15 && s <= 90 && l >= 85 && l <= 96;
+
+    if (isGrayBuilding || isYellowBuilding) {
       buildingMask[i] = 1;
     }
 
@@ -1049,7 +1063,7 @@ function processBuildingMask(
 
   // Filter, trace contours, convert to coordinate space
   const minPixels = 150;
-  const maxPixels = w * h * 0.06; // raised from 0.04 to allow larger buildings
+  const maxPixels = w * h * 0.15; // allow large buildings (highlighted parcels can be ~12% of image)
   const result: DetectedRegion[] = [];
 
   for (const [rootLabel, r] of regionMap) {
