@@ -73,6 +73,36 @@ export default function Home() {
   const svgContainerRef = useRef<HTMLDivElement>(null);
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   
+  // Layer visibility
+  const [visibleLayers, setVisibleLayers] = useState<Set<string>>(
+    new Set(["building", "street", "parcel", "vegetation", "water", "sidewalk", "parking"])
+  );
+  
+  // Computed SVG with layer visibility
+  const [filteredSvg, setFilteredSvg] = useState<string | null>(null);
+  
+  // Update SVG when layers or result changes
+  useEffect(() => {
+    if (!result?.svg) {
+      setFilteredSvg(null);
+      return;
+    }
+    
+    // Generate layer CSS
+    const allLayers = ["building", "street", "parcel", "vegetation", "water", "sidewalk", "parking"];
+    let layerCss = '<style>\n';
+    for (const layer of allLayers) {
+      const display = visibleLayers.has(layer) ? 'block' : 'none';
+      layerCss += `.layer-${layer} { display: ${display}; }\n`;
+    }
+    layerCss += '</style>';
+    
+    // Inject CSS after the opening svg tag
+    let svg = result.svg;
+    svg = svg.replace('<svg xmlns', layerCss + '\n<svg xmlns');
+    setFilteredSvg(svg);
+  }, [result?.svg, visibleLayers]);
+  
   // Overlay options
   const [includeDimensions, setIncludeDimensions] = useState(true);
   const [includeNorthArrow, setIncludeNorthArrow] = useState(true);
@@ -928,6 +958,31 @@ export default function Home() {
                     </span>
                   </div>
                   
+                  {/* Layer toggles */}
+                  <div className="flex flex-wrap gap-1">
+                    {["building", "street", "parcel", "vegetation", "water"].map(layer => (
+                      <button
+                        key={layer}
+                        onClick={() => {
+                          const newLayers = new Set(visibleLayers);
+                          if (newLayers.has(layer)) {
+                            newLayers.delete(layer);
+                          } else {
+                            newLayers.add(layer);
+                          }
+                          setVisibleLayers(newLayers);
+                        }}
+                        className={`rounded px-2 py-0.5 text-xs capitalize ${
+                          visibleLayers.has(layer)
+                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                            : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
+                        }`}
+                      >
+                        {layer}
+                      </button>
+                    ))}
+                  </div>
+                  
                   <div 
                     ref={svgContainerRef}
                     className="aspect-video overflow-hidden rounded-lg border bg-white dark:bg-zinc-950 cursor-grab"
@@ -960,7 +1015,7 @@ export default function Home() {
                         transformOrigin: 'center center',
                         transition: isPanning ? 'none' : 'transform 0.1s ease-out'
                       }}
-                      dangerouslySetInnerHTML={{ __html: result.svg }}
+                      dangerouslySetInnerHTML={{ __html: filteredSvg || result.svg }}
                     />
                   </div>
                 </div>

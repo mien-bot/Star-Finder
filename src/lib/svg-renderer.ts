@@ -101,20 +101,20 @@ export function featuresToSvg(
       const colors = isHighway ? streetColors.highway : streetColors.local;
 
       featureSvgs.push(
-        `<path d="${pathD}" fill="none" stroke="${colors.border}" stroke-width="${(feature.width || 5) + 0.6}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.4"/>`
+        `<path class="layer-${feature.type}" d="${pathD}" fill="none" stroke="${colors.border}" stroke-width="${(feature.width || 5) + 0.6}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.4"/>`
       );
       featureSvgs.push(
-        `<path d="${pathD}" fill="none" stroke="${colors.fill}" stroke-width="${feature.width || 5}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.95"/>`
+        `<path class="layer-${feature.type}" d="${pathD}" fill="none" stroke="${colors.fill}" stroke-width="${feature.width || 5}" stroke-linecap="butt" stroke-linejoin="round" opacity="0.95"/>`
       );
 
       if ((feature.width || 0) >= 4 && !isHighway) {
         featureSvgs.push(
-          `<path d="${pathD}" fill="none" stroke="#e8c840" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.2,0.8" opacity="0.5"/>`
+          `<path class="layer-${feature.type}" d="${pathD}" fill="none" stroke="#e8c840" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.2,0.8" opacity="0.5"/>`
         );
       }
       if (isHighway && (feature.width || 0) >= 6) {
         featureSvgs.push(
-          `<path d="${pathD}" fill="none" stroke="#ffffff" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.5,1" opacity="0.5"/>`
+          `<path class="layer-${feature.type}" d="${pathD}" fill="none" stroke="#ffffff" stroke-width="0.2" stroke-linecap="butt" stroke-dasharray="1.5,1" opacity="0.5"/>`
         );
       }
 
@@ -144,7 +144,7 @@ export function featuresToSvg(
     if (feature.svgPath) {
       const scale = 100 / 1000;
       featureSvgs.push(
-        `<g transform="scale(${scale})"><path d="${feature.svgPath}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${style.strokeWidth / scale}"/></g>`
+        `<g class="layer-${feature.type}" transform="scale(${scale})"><path d="${feature.svgPath}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${style.strokeWidth / scale}"/></g>`
       );
 
       if (feature.label && feature.type === "building" && feature.points.length > 0) {
@@ -167,7 +167,7 @@ export function featuresToSvg(
       feature.cornerRadius || 0
     );
     featureSvgs.push(
-      `<path d="${pathD}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${style.strokeWidth}"/>`
+      `<path class="layer-${feature.type}" d="${pathD}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${style.strokeWidth}"/>`
     );
 
     if (feature.label) {
@@ -210,11 +210,23 @@ export function featuresToSvg(
     ${featureTypes.map((type, i) => {
       const style = styles[type] || styles.building;
       const y = 4.5 + i * 3.5;
-      return `<rect x="1.5" y="${y}" width="3" height="2" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="0.2"/>
+      return `<rect x="1.5" y="${y}" width="3" height="2" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="0.2" class="layer-${type}"/>
     <text x="5.5" y="${y + 1.5}" font-size="1.1" fill="#555">${type}</text>`;
     }).join('\n    ')}
   </g>
   ` : '';
+
+  // Layer visibility CSS
+  const layerCss = `
+  <style>
+    .layer-parcel { display: block; }
+    .layer-street { display: block; }
+    .layer-sidewalk { display: block; }
+    .layer-building { display: block; }
+    .layer-vegetation { display: block; }
+    .layer-water { display: block; }
+    .layer-parking { display: block; }
+  </style>`;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" style="background-color: #f0f0ee; width: 100%; height: 100%;">
   <defs>
@@ -222,6 +234,7 @@ export function featuresToSvg(
       <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#e5e5e2" stroke-width="0.08"/>
     </pattern>
   </defs>
+  ${layerCss}
   <rect width="${vbW}" height="${vbH}" fill="url(#grid)"/>
 
   <!-- Features -->
