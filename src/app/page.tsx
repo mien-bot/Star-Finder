@@ -50,6 +50,7 @@ export default function Home() {
   const [addressInput, setAddressInput] = useState("");
   const [radiusInput, setRadiusInput] = useState(200);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStep, setProcessingStep] = useState<string>("");
   const [isLoading3D, setIsLoading3D] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +66,12 @@ export default function Home() {
   const [showEditPanel, setShowEditPanel] = useState(false);
   const [editingBuilding, setEditingBuilding] = useState<number | null>(null);
   const [editedBuildings, setEditedBuildings] = useState<ProcessingResult["buildings"] | null>(null);
+  
+  // SVG zoom and pan
+  const [svgTransform, setSvgTransform] = useState({ scale: 1, x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const svgContainerRef = useRef<HTMLDivElement>(null);
+  const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   
   // Overlay options
   const [includeDimensions, setIncludeDimensions] = useState(true);
@@ -394,6 +401,27 @@ export default function Home() {
     };
   }, [activeTab, blenderResult]);
 
+  // Progress step indicator
+  useEffect(() => {
+    if (!isProcessing) {
+      setProcessingStep("");
+      return;
+    }
+    
+    const steps = inputMode === "address"
+      ? ["Geocoding address...", "Fetching map data...", "Building site plan..."]
+      : ["Analyzing image...", "Detecting buildings...", "Rendering plan..."];
+    
+    let i = 0;
+    setProcessingStep(steps[0]);
+    const interval = setInterval(() => {
+      i = Math.min(i + 1, steps.length - 1);
+      setProcessingStep(steps[i]);
+    }, 2000);
+    
+    return () => clearInterval(interval);
+  }, [isProcessing, inputMode]);
+
   const buildings = editedBuildings || result?.buildings;
 
   if (!isAuthenticated) {
@@ -643,9 +671,11 @@ export default function Home() {
               className="w-full rounded-lg bg-blue-600 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isProcessing ? (
-                <span className="flex items-center justify-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Processing...
+                <span className="flex flex-col items-center justify-center gap-1">
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {processingStep || "Processing..."}
+                  </span>
                 </span>
               ) : (
                 "Generate Site Plan"
@@ -872,11 +902,67 @@ export default function Home() {
                   </div>
                 </div>
               ) : activeTab === "2d" ? (
-                <div className="aspect-video overflow-hidden rounded-lg border bg-white dark:bg-zinc-950">
-                  <div
-                    className="h-full w-full"
-                    dangerouslySetInnerHTML={{ __html: result.svg }}
-                  />
+                <div className="space-y-2">
+                  {/* Zoom controls */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setSvgTransform({ scale: 1, x: 0, y: 0 })}
+                      className="rounded-lg bg-zinc-100 px-3 py-1 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                    >
+                      Reset zoom
+                    </button>
+                    <button
+                      onClick={() => setSvgTransform(t => ({ ...t, scale: Math.min(5, t.scale + 0.5) }))}
+                      className="rounded-lg bg-zinc-100 px-3 py-1 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                    >
+                      +
+                    </button>
+                    <button
+                      onClick={() => setSvgTransform(t => ({ ...t, scale: Math.max(0.5, t.scale - 0.5) }))}
+                      className="rounded-lg bg-zinc-100 px-3 py-1 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                    >
+                      −
+                    </button>
+                    <span className="text-xs text-zinc-400 self-center">
+                      {Math.round(svgTransform.scale * 100)}%
+                    </span>
+                  </div>
+                  
+                  <div 
+                    ref={svgContainerRef}
+                    className="aspect-video overflow-hidden rounded-lg border bg-white dark:bg-zinc-950 cursor-grab"
+                    style={{ cursor: svgTransform.scale > 1 ? (isPanning ? 'grabbing' : 'grab') : 'default' }}
+                    onWheel={(e) => {
+                      e.preventDefault();
+                      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                      setSvgTransform(t => ({ ...t, scale: Math.max(0.5, Math.min(5, t.scale + delta)) }));
+                    }}
+                    onMouseDown={(e) => {
+                      if (svgTransform.scale > 1) {
+                        setIsPanning(true);
+                        panStartRef.current = { x: e.clientX, y: e.clientY, tx: svgTransform.x, ty: svgTransform.y };
+                      }
+                    }}
+                    onMouseMove={(e) => {
+                      if (isPanning) {
+                        const dx = e.clientX - panStartRef.current.x;
+                        const dy = e.clientY - panStartRef.current.y;
+                        setSvgTransform(t => ({ ...t, x: panStartRef.current.tx + dx, y: panStartRef.current.ty + dy }));
+                      }
+                    }}
+                    onMouseUp={() => setIsPanning(false)}
+                    onMouseLeave={() => setIsPanning(false)}
+                  >
+                    <div
+                      className="h-full w-full"
+                      style={{ 
+                        transform: `scale(${svgTransform.scale}) translate(${svgTransform.x}px, ${svgTransform.y}px)`,
+                        transformOrigin: 'center center',
+                        transition: isPanning ? 'none' : 'transform 0.1s ease-out'
+                      }}
+                      dangerouslySetInnerHTML={{ __html: result.svg }}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4">
