@@ -233,10 +233,20 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
     return true;
   });
 
-  // Combine all features
-  let allFeatures: Feature[] = [...streetFeatures, ...filteredBuildings].map(
-    (f, idx) => ({ ...f, id: idx + 1 })
+  // Step 4: Compute parcels from street grid + building positions
+  const parcelFeatures = computeParcels(
+    analysis.streets,
+    filteredBuildings,
+    analysis.viewBox.width,
+    analysis.viewBox.height
   );
+
+  // Combine all features: parcels first (background), then streets, then buildings (top)
+  let allFeatures: Feature[] = [
+    ...parcelFeatures,
+    ...streetFeatures,
+    ...filteredBuildings,
+  ].map((f, idx) => ({ ...f, id: idx + 1 }));
 
   // Extract buildings for backward compatibility
   const buildings = allFeatures
@@ -244,7 +254,7 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
     .map((f, idx) => ({ id: idx + 1, points: f.points }));
 
   console.log(
-    `Done: ${allFeatures.length} features, ${buildings.length} buildings`
+    `Done: ${allFeatures.length} features (${parcelFeatures.length} parcels), ${buildings.length} buildings`
   );
 
   return {
@@ -253,6 +263,150 @@ async function analyzeSiteImage(imageData: string, detailLevel: number = 2): Pro
     tracingUsed: true,
     viewBox: analysis.viewBox,
   };
+}
+
+// ─── Parcel computation from street grid + buildings ────────────────────────
+// Computes city block parcels from the detected street grid, then subdivides
+// each block into individual lot parcels based on building positions.
+
+function computeParcels(
+  streets: { centerline: Point[]; width: number }[],
+  buildings: Feature[],
+  viewBoxW: number,
+  viewBoxH: number
+): Feature[] {
+  // Separate vertical and horizontal streets
+  const verticals: { x: number; w: number }[] = [];
+  const horizontals: { y: number; w: number }[] = [];
+
+  for (const s of streets) {
+    if (s.centerline.length < 2) continue;
+    const dx = Math.abs(s.centerline[0].x - s.centerline[1].x);
+    const dy = Math.abs(s.centerline[0].y - s.centerline[1].y);
+    if (dx < 2 && dy > 5) {
+      verticals.push({ x: s.centerline[0].x, w: s.width });
+    } else if (dy < 2 && dx > 5) {
+      horizontals.push({ y: s.centerline[0].y, w: s.width });
+    }
+  }
+
+  verticals.sort((a, b) => a.x - b.x);
+  horizontals.sort((a, b) => a.y - b.y);
+
+  // X and Y edges: viewport boundaries + street centerlines
+  const xEdges = [0, ...verticals.map((v) => v.x), viewBoxW];
+  const yEdges = [0, ...horizontals.map((h) => h.y), viewBoxH];
+
+  const parcels: Feature[] = [];
+
+  for (let i = 0; i < xEdges.length - 1; i++) {
+    for (let j = 0; j < yEdges.length - 1; j++) {
+      // Inset block boundaries by half street width
+      const left =
+        i === 0 ? xEdges[i] : xEdges[i] + (verticals[i - 1]?.w || 0) / 2;
+      const right =
+        i === xEdges.length - 2
+          ? xEdges[i + 1]
+          : xEdges[i + 1] - (verticals[i]?.w || 0) / 2;
+      const top =
+        j === 0 ? yEdges[j] : yEdges[j] + (horizontals[j - 1]?.w || 0) / 2;
+      const bottom =
+        j === yEdges.length - 2
+          ? yEdges[j + 1]
+          : yEdges[j + 1] - (horizontals[j]?.w || 0) / 2;
+
+      if (right - left < 4 || bottom - top < 4) continue;
+
+      // Find buildings inside this block
+      const blockBuildings = buildings.filter((b) => {
+        const cx =
+          b.points.reduce((s, p) => s + p.x, 0) / b.points.length;
+        const cy =
+          b.points.reduce((s, p) => s + p.y, 0) / b.points.length;
+        return cx > left && cx < right && cy > top && cy < bottom;
+      });
+
+      if (blockBuildings.length <= 1) {
+        // Single building or empty block — one parcel for the whole block
+        parcels.push({
+          id: 0,
+          type: "parcel",
+          points: [
+            { x: left, y: top },
+            { x: right, y: top },
+            { x: right, y: bottom },
+            { x: left, y: bottom },
+          ],
+        });
+      } else {
+        // Multiple buildings — subdivide into individual lot parcels
+        // Determine if buildings are arranged vertically or horizontally
+        const blockWidth = right - left;
+        const blockHeight = bottom - top;
+
+        // Sort buildings by their center position along the block's long axis
+        const isVerticalBlock = blockHeight > blockWidth;
+        const sorted = [...blockBuildings].sort((a, b) => {
+          const aCtr = isVerticalBlock
+            ? a.points.reduce((s, p) => s + p.y, 0) / a.points.length
+            : a.points.reduce((s, p) => s + p.x, 0) / a.points.length;
+          const bCtr = isVerticalBlock
+            ? b.points.reduce((s, p) => s + p.y, 0) / b.points.length
+            : b.points.reduce((s, p) => s + p.x, 0) / b.points.length;
+          return aCtr - bCtr;
+        });
+
+        // Create lot boundaries between adjacent buildings
+        const boundaries: number[] = [isVerticalBlock ? top : left];
+        for (let k = 0; k < sorted.length - 1; k++) {
+          const curr = sorted[k];
+          const next = sorted[k + 1];
+          if (isVerticalBlock) {
+            const currBottom = Math.max(...curr.points.map((p) => p.y));
+            const nextTop = Math.min(...next.points.map((p) => p.y));
+            boundaries.push((currBottom + nextTop) / 2);
+          } else {
+            const currRight = Math.max(...curr.points.map((p) => p.x));
+            const nextLeft = Math.min(...next.points.map((p) => p.x));
+            boundaries.push((currRight + nextLeft) / 2);
+          }
+        }
+        boundaries.push(isVerticalBlock ? bottom : right);
+
+        // Create a parcel for each lot
+        for (let k = 0; k < boundaries.length - 1; k++) {
+          if (isVerticalBlock) {
+            parcels.push({
+              id: 0,
+              type: "parcel",
+              points: [
+                { x: left, y: boundaries[k] },
+                { x: right, y: boundaries[k] },
+                { x: right, y: boundaries[k + 1] },
+                { x: left, y: boundaries[k + 1] },
+              ],
+            });
+          } else {
+            parcels.push({
+              id: 0,
+              type: "parcel",
+              points: [
+                { x: boundaries[k], y: top },
+                { x: boundaries[k + 1], y: top },
+                { x: boundaries[k + 1], y: bottom },
+                { x: boundaries[k], y: bottom },
+              ],
+            });
+          }
+        }
+      }
+    }
+  }
+
+  console.log(
+    `Parcel computation: ${parcels.length} lots from ${xEdges.length - 1}x${yEdges.length - 1} blocks`
+  );
+  return parcels;
 }
 
 // ─── Centerline → Polygon conversion ────────────────────────────────────────
@@ -308,10 +462,10 @@ function featuresToSvg(
     { fill: string; stroke: string; strokeWidth: number; opacity: number }
   > = {
     parcel: {
-      fill: "#f0f0ee", // very light warm gray (Google Maps land background)
-      stroke: "#e0ddd8",
-      strokeWidth: 0.15,
-      opacity: 0.7,
+      fill: "none", // parcels are outlines only (lot boundaries)
+      stroke: "#d5d2cc", // visible gray lot lines matching Google Maps
+      strokeWidth: 0.25,
+      opacity: 0.9,
     },
     street: {
       fill: "#a0aab5", // blue-gray (Google Maps road surface)
