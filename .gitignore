@@ -41,6 +41,3 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# star catalog data (generated)
-public/data/hyg-bright.json
-public/data/constellation-index.json

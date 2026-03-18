@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import { localSiderealTime, raDecToAltAz, projectToCamera } from "@/lib/celestial"
 import { constellationLines, constellationNames } from "@/lib/constellation-lines"
-import { X, Compass, MapPin } from "lucide-react"
+import { X, Compass, MapPin, Play } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
 interface CatalogStar {
@@ -29,6 +29,8 @@ interface CameraViewProps {
   onClose: () => void
 }
 
+type Phase = "setup" | "active"
+
 export function CameraView({ onClose }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -38,101 +40,111 @@ export function CameraView({ onClose }: CameraViewProps) {
   const orientationRef = useRef<{ alpha: number; beta: number; gamma: number }>({ alpha: 0, beta: 90, gamma: 0 })
   const animFrameRef = useRef<number>(0)
 
+  const [phase, setPhase] = useState<Phase>("setup")
   const [hasLocation, setHasLocation] = useState(false)
   const [hasOrientation, setHasOrientation] = useState(false)
   const [hasCamera, setHasCamera] = useState(false)
+  const [hasCatalog, setHasCatalog] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState("")
 
-  // Load star catalog
+  // Load star catalog on mount
   useEffect(() => {
-    fetch("/data/hyg-bright.json")
-      .then(r => r.json())
-      .then((data: CatalogStar[]) => {
-        // Filter to bright stars for performance (mag < 5.5)
+    const loadCatalog = async () => {
+      try {
+        // Use absolute URL based on current page origin
+        const url = `${window.location.origin}/data/hyg-bright.json`
+        const r = await fetch(url)
+        if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`)
+        const data: CatalogStar[] = await r.json()
         starsRef.current = data.filter(s => s.mag < 5.5)
-      })
-      .catch(() => setError("Failed to load star catalog"))
+        setHasCatalog(true)
+      } catch (err: any) {
+        console.error("Failed to load catalog:", err)
+        setError(`Failed to load star catalog: ${err.message}`)
+      }
+    }
+    loadCatalog()
   }, [])
 
-  // Get GPS location
-  useEffect(() => {
-    if (!navigator.geolocation) {
-      setError("Geolocation not available")
+  // Request all permissions — must be called from a user gesture (button tap)
+  const handleStart = useCallback(async () => {
+    setError(null)
+
+    // 1. Request GPS
+    try {
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 10000,
+        })
+      })
+      locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      setHasLocation(true)
+    } catch (err: any) {
+      setError(`Location access denied: ${err.message}`)
       return
     }
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
-        setHasLocation(true)
-      },
-      err => setError(`Location error: ${err.message}`),
-      { enableHighAccuracy: true }
-    )
-  }, [])
 
-  // Get device orientation
-  useEffect(() => {
-    const requestPermission = async () => {
-      // iOS requires explicit permission request
+    // 2. Request device orientation (iOS needs explicit permission from user gesture)
+    try {
       const DOE = DeviceOrientationEvent as any
       if (typeof DOE.requestPermission === "function") {
-        try {
-          const perm = await DOE.requestPermission()
-          if (perm !== "granted") {
-            setError("Orientation permission denied")
-            return
-          }
-        } catch {
-          setError("Could not request orientation permission")
+        const perm = await DOE.requestPermission()
+        if (perm !== "granted") {
+          setError("Orientation permission denied")
           return
         }
       }
 
-      const handler = (e: DeviceOrientationEvent) => {
+      const orientHandler = (e: DeviceOrientationEvent) => {
         if (e.alpha !== null) {
           orientationRef.current = {
             alpha: e.alpha || 0,
             beta: e.beta || 0,
             gamma: e.gamma || 0,
           }
-          setHasOrientation(true)
+          if (!hasOrientation) setHasOrientation(true)
         }
       }
-      window.addEventListener("deviceorientation", handler, true)
-      return () => window.removeEventListener("deviceorientation", handler, true)
+      window.addEventListener("deviceorientation", orientHandler, true)
+      // Give it a moment to see if we get data
+      await new Promise(resolve => setTimeout(resolve, 500))
+      setHasOrientation(true)
+    } catch {
+      // Orientation may not be available on desktop — continue anyway
+      console.warn("Device orientation not available")
     }
 
-    requestPermission()
-  }, [])
+    // 3. Request camera
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        setHasCamera(true)
+      }
+    } catch {
+      // Camera not available — still works as a star map
+      console.warn("Camera not available")
+    }
 
-  // Start camera
+    setPhase("active")
+  }, [hasOrientation])
+
+  // Cleanup camera on unmount
   useEffect(() => {
-    const startCamera = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-        })
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          setHasCamera(true)
-        }
-      } catch {
-        // Camera not available — still useful without it as a star map
-        setHasCamera(false)
-      }
-    }
-    startCamera()
-
     return () => {
       if (videoRef.current?.srcObject) {
         const tracks = (videoRef.current.srcObject as MediaStream).getTracks()
         tracks.forEach(t => t.stop())
       }
+      cancelAnimationFrame(animFrameRef.current)
     }
   }, [])
 
-  // Render loop
+  // Render loop — only runs in active phase
   const render = useCallback(() => {
     const canvas = canvasRef.current
     const container = containerRef.current
@@ -170,45 +182,40 @@ export function CameraView({ onClose }: CameraViewProps) {
     const lst = localSiderealTime(now, loc.lng)
 
     // Camera pointing direction from device orientation
-    // In portrait mode: beta=90 → horizon, beta=0 → zenith
+    // Portrait mode: beta=90 → horizon, beta=0 → zenith
     const camAlt = 90 - orient.beta
     const camAz = orient.alpha
     const camRoll = orient.gamma
 
-    const hFov = 65 // typical smartphone camera FOV
+    const hFov = 65
 
     // Project stars
     const projected: ProjectedStar[] = []
     for (const star of stars) {
-      const raDeg = star.ra * 15 // hours to degrees
+      const raDeg = star.ra * 15
       const { alt, az } = raDecToAltAz(raDeg, star.dec, loc.lat, lst)
 
-      if (alt < -5) continue // below horizon
+      if (alt < -5) continue
 
       const pos = projectToCamera(alt, az, camAlt, camAz, camRoll, hFov, w, h)
       if (pos) {
         projected.push({
-          x: pos.x,
-          y: pos.y,
-          mag: star.mag,
-          name: star.name,
-          hip: star.hip,
-          con: star.con,
+          x: pos.x, y: pos.y, mag: star.mag,
+          name: star.name, hip: star.hip, con: star.con,
         })
       }
     }
 
-    // Build constellation connections for visible stars
+    // Build constellation connections
     const hipToProjected = new Map<number, ProjectedStar>()
     for (const s of projected) {
       if (s.hip) hipToProjected.set(s.hip, s)
     }
 
-    // Draw constellation lines
     const drawnConstellations = new Map<string, { cx: number; cy: number; count: number }>()
 
+    // Draw constellation lines
     for (const [abbr, lines] of Object.entries(constellationLines)) {
-      let drawn = false
       for (const [hip1, hip2] of lines) {
         const s1 = hipToProjected.get(hip1)
         const s2 = hipToProjected.get(hip2)
@@ -219,9 +226,7 @@ export function CameraView({ onClose }: CameraViewProps) {
           ctx.moveTo(s1.x, s1.y)
           ctx.lineTo(s2.x, s2.y)
           ctx.stroke()
-          drawn = true
 
-          // Track constellation center for labels
           const entry = drawnConstellations.get(abbr) || { cx: 0, cy: 0, count: 0 }
           entry.cx += s1.x + s2.x
           entry.cy += s1.y + s2.y
@@ -231,9 +236,9 @@ export function CameraView({ onClose }: CameraViewProps) {
       }
     }
 
-    // Determine which stars are in constellations (connected)
+    // Which stars are in drawn constellations
     const connectedHips = new Set<number>()
-    for (const [abbr, lines] of Object.entries(constellationLines)) {
+    for (const [, lines] of Object.entries(constellationLines)) {
       for (const [hip1, hip2] of lines) {
         if (hipToProjected.has(hip1) && hipToProjected.has(hip2)) {
           connectedHips.add(hip1)
@@ -242,17 +247,16 @@ export function CameraView({ onClose }: CameraViewProps) {
       }
     }
 
-    // Draw stars — constellation stars bigger, others very subtle
+    // Draw stars
     for (const star of projected) {
       const isConstStar = star.hip ? connectedHips.has(star.hip) : false
-      if (!isConstStar && star.mag > 3.5) continue // skip faint non-constellation stars
+      if (!isConstStar && star.mag > 3.5) continue
 
       const baseSize = isConstStar
         ? Math.max(2, 5 - star.mag * 0.7)
         : Math.max(0.8, 2.5 - star.mag * 0.4)
       const opacity = isConstStar ? 1 : 0.4
 
-      // Glow
       const gradient = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, baseSize * 2.5)
       gradient.addColorStop(0, `rgba(200, 220, 255, ${opacity * 0.7})`)
       gradient.addColorStop(0.5, `rgba(150, 180, 255, ${opacity * 0.2})`)
@@ -262,7 +266,6 @@ export function CameraView({ onClose }: CameraViewProps) {
       ctx.arc(star.x, star.y, baseSize * 2.5, 0, Math.PI * 2)
       ctx.fill()
 
-      // Core
       ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`
       ctx.beginPath()
       ctx.arc(star.x, star.y, baseSize, 0, Math.PI * 2)
@@ -283,23 +286,66 @@ export function CameraView({ onClose }: CameraViewProps) {
     }
     ctx.shadowBlur = 0
 
-    // Update info display
     const constellationCount = drawnConstellations.size
-    const altStr = camAlt.toFixed(0)
-    const azStr = camAz.toFixed(0)
-    setInfo(`Alt ${altStr}° Az ${azStr}° · ${projected.length} stars · ${constellationCount} constellations`)
+    setInfo(`Alt ${camAlt.toFixed(0)}° Az ${camAz.toFixed(0)}° · ${projected.length} stars · ${constellationCount} constellations`)
 
     animFrameRef.current = requestAnimationFrame(render)
   }, [hasCamera])
 
   useEffect(() => {
-    animFrameRef.current = requestAnimationFrame(render)
-    return () => cancelAnimationFrame(animFrameRef.current)
-  }, [render])
+    if (phase === "active") {
+      animFrameRef.current = requestAnimationFrame(render)
+      return () => cancelAnimationFrame(animFrameRef.current)
+    }
+  }, [phase, render])
 
+  // Setup screen — request permissions via user gesture
+  if (phase === "setup") {
+    return (
+      <div className="fixed inset-0 z-50 bg-black flex items-center justify-center">
+        <div className="text-center text-white max-w-sm px-6">
+          <Compass className="w-16 h-16 mx-auto mb-6 text-primary opacity-70" />
+          <h2 className="text-2xl font-bold mb-3">Live Sky View</h2>
+          <p className="text-sm text-white/60 mb-6">
+            Uses your location, compass, and camera to overlay constellations in real time.
+          </p>
+
+          <div className="space-y-3 text-left text-sm text-white/50 mb-8">
+            <div className="flex items-center gap-2">
+              <MapPin className="w-4 h-4 shrink-0" />
+              <span>GPS location — to compute which stars are above the horizon</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Compass className="w-4 h-4 shrink-0" />
+              <span>Compass &amp; gyroscope — to track where the camera points</span>
+            </div>
+          </div>
+
+          {error && (
+            <p className="text-red-400 text-sm mb-4">{error}</p>
+          )}
+
+          <div className="flex gap-3">
+            <Button variant="outline" onClick={onClose} className="flex-1 border-white/20 text-white hover:bg-white/10">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleStart}
+              disabled={!hasCatalog}
+              className="flex-1 bg-primary hover:bg-primary/90"
+            >
+              <Play className="w-4 h-4 mr-2" />
+              {hasCatalog ? "Start" : "Loading catalog..."}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Active view
   return (
     <div ref={containerRef} className="fixed inset-0 z-50 bg-black">
-      {/* Camera video feed */}
       <video
         ref={videoRef}
         autoPlay
@@ -309,19 +355,18 @@ export function CameraView({ onClose }: CameraViewProps) {
         style={{ display: hasCamera ? "block" : "none" }}
       />
 
-      {/* Star overlay canvas */}
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
       {/* Top bar */}
-      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between p-4">
+      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between p-4 bg-gradient-to-b from-black/50 to-transparent">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-xs text-white/70">
             <MapPin className="w-3.5 h-3.5" />
-            <span>{hasLocation ? "GPS locked" : "Waiting for GPS..."}</span>
+            <span>{hasLocation ? "GPS locked" : "No GPS"}</span>
           </div>
           <div className="flex items-center gap-1.5 text-xs text-white/70">
             <Compass className="w-3.5 h-3.5" />
-            <span>{hasOrientation ? "Compass active" : "No compass data"}</span>
+            <span>{hasOrientation ? "Compass active" : "No compass"}</span>
           </div>
         </div>
         <Button variant="ghost" size="sm" onClick={onClose} className="text-white hover:bg-white/10">
@@ -330,30 +375,9 @@ export function CameraView({ onClose }: CameraViewProps) {
       </div>
 
       {/* Bottom info bar */}
-      <div className="absolute bottom-0 left-0 right-0 z-10 p-4">
+      <div className="absolute bottom-0 left-0 right-0 z-10 p-4 bg-gradient-to-t from-black/50 to-transparent">
         <div className="text-center text-xs text-white/60">{info}</div>
       </div>
-
-      {/* Error display */}
-      {error && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 bg-red-900/80 text-white text-sm px-4 py-2 rounded-lg">
-          {error}
-        </div>
-      )}
-
-      {/* No compass fallback message */}
-      {!hasOrientation && hasLocation && (
-        <div className="absolute inset-0 flex items-center justify-center z-5">
-          <div className="text-center text-white/80 max-w-sm px-6">
-            <Compass className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p className="text-lg font-medium mb-2">Point your phone at the sky</p>
-            <p className="text-sm text-white/60">
-              Device orientation sensors are needed for live sky tracking.
-              This feature works best on mobile devices.
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
