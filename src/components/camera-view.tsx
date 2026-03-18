@@ -380,7 +380,7 @@ export function CameraView({ onClose }: CameraViewProps) {
 
           {/* Debug info */}
           <div className="text-left text-xs text-white/30 mb-4 font-mono">
-            <p>secure: {typeof window !== "undefined" ? String(window.isSecureContext) : "?"} | geo: {typeof navigator !== "undefined" ? String(!!navigator.geolocation) : "?"} | protocol: {typeof window !== "undefined" ? window.location.protocol : "?"}</p>
+            <p>secure: {isSecure ? "yes" : "no"} | catalog: {catalogStatus}</p>
           </div>
 
           {/* Permission status list */}
