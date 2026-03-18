@@ -80,9 +80,26 @@ export function CameraView({ onClose }: CameraViewProps) {
   const handleStart = useCallback(async () => {
     setErrorDetail(null)
 
+    // If catalog didn't load, try again
+    if (catalogStatus !== "granted") {
+      setCatalogStatus("requesting")
+      try {
+        const r = await fetch("/data/hyg-bright.json")
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const data: CatalogStar[] = await r.json()
+        starsRef.current = data.filter(s => s.mag < 5.5)
+        setCatalogStatus("granted")
+      } catch (err: any) {
+        setCatalogStatus("denied")
+        setErrorDetail(`Could not load star catalog: ${err.message}`)
+        return
+      }
+    }
+
+    try {
     // 1. GPS Location
     setLocationStatus("requesting")
-    setStatusMsg("Requesting location access...")
+    setStatusMsg("Requesting location access — please tap Allow when prompted...")
 
     if (!navigator.geolocation) {
       setLocationStatus("unavailable")
@@ -177,7 +194,11 @@ export function CameraView({ onClose }: CameraViewProps) {
 
     setStatusMsg("")
     setActive(true)
-  }, [])
+  } catch (err: any) {
+    setStatusMsg("")
+    setErrorDetail(`Unexpected error: ${err.message}`)
+  }
+  }, [catalogStatus])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -398,11 +419,14 @@ export function CameraView({ onClose }: CameraViewProps) {
             </Button>
             <Button
               onClick={handleStart}
-              disabled={catalogStatus !== "granted" || locationStatus === "requesting"}
+              disabled={locationStatus === "requesting" || orientationStatus === "requesting" || cameraStatus === "requesting"}
               className="flex-1 bg-primary hover:bg-primary/90"
             >
-              <Play className="w-4 h-4 mr-2" />
-              {catalogStatus === "granted" ? "Start" : "Loading..."}
+              {locationStatus === "requesting" || orientationStatus === "requesting" ? (
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Requesting...</>
+              ) : (
+                <><Play className="w-4 h-4 mr-2" /> Start</>
+              )}
             </Button>
           </div>
         </div>
