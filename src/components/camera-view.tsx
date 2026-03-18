@@ -76,38 +76,33 @@ export function CameraView({ onClose }: CameraViewProps) {
       })
   }, [])
 
-  // Step-by-step permission requests — triggered by user tap
+  // Retry catalog load
+  const retryCatalog = useCallback(async () => {
+    setCatalogStatus("requesting")
+    try {
+      const r = await fetch("/data/hyg-bright.json")
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data: CatalogStar[] = await r.json()
+      starsRef.current = data.filter(s => s.mag < 5.5)
+      setCatalogStatus("granted")
+      return true
+    } catch (err: any) {
+      setCatalogStatus("denied")
+      setErrorDetail(`Could not load star catalog: ${err.message}`)
+      return false
+    }
+  }, [])
+
+  // Request permissions — triggered by user tap (must be synchronous user gesture for GPS prompt)
   const handleStart = useCallback(async () => {
     setErrorDetail(null)
-
-    // If catalog didn't load, try again
-    if (catalogStatus !== "granted") {
-      setCatalogStatus("requesting")
-      try {
-        const r = await fetch("/data/hyg-bright.json")
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        const data: CatalogStar[] = await r.json()
-        starsRef.current = data.filter(s => s.mag < 5.5)
-        setCatalogStatus("granted")
-      } catch (err: any) {
-        setCatalogStatus("denied")
-        setErrorDetail(`Could not load star catalog: ${err.message}`)
-        return
-      }
-    }
-
-    try {
-    // 1. GPS Location
+    setStatusMsg("Requesting location...")
     setLocationStatus("requesting")
-    setStatusMsg("Requesting location access — please tap Allow when prompted...")
 
-    if (!navigator.geolocation) {
-      setLocationStatus("unavailable")
-      setErrorDetail("Your browser does not support geolocation")
-      return
-    }
-
+    // 1. GPS — must happen first, closest to user gesture
     try {
+      if (!navigator.geolocation) throw new Error("Geolocation not supported")
+
       const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, {
           enableHighAccuracy: true,
@@ -117,88 +112,70 @@ export function CameraView({ onClose }: CameraViewProps) {
       })
       locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
       setLocationStatus("granted")
-      setStatusMsg(`Location: ${pos.coords.latitude.toFixed(2)}°, ${pos.coords.longitude.toFixed(2)}°`)
     } catch (err: any) {
       setLocationStatus("denied")
       const reasons: Record<number, string> = {
-        1: "Permission denied — please allow location access in your browser settings",
+        1: "Permission denied — tap the lock icon in your browser's address bar to allow location",
         2: "Position unavailable — could not determine your location",
-        3: "Request timed out — try again in an open area",
+        3: "Request timed out — try again",
       }
-      setErrorDetail(reasons[err.code] || `Location error: ${err.message}`)
+      setErrorDetail(reasons[err?.code] || `Location error: ${err?.message || "unknown"}`)
+      setStatusMsg("")
       return
     }
 
-    // 2. Device Orientation (compass/gyroscope)
+    // 2. Device Orientation
     setOrientationStatus("requesting")
-    setStatusMsg("Requesting compass access...")
-
+    setStatusMsg("Requesting compass...")
     try {
       const DOE = DeviceOrientationEvent as any
       if (typeof DOE.requestPermission === "function") {
         const perm = await DOE.requestPermission()
         if (perm !== "granted") {
-          setOrientationStatus("denied")
-          setErrorDetail("Compass permission denied — please allow motion & orientation access")
-          return
+          setOrientationStatus("unavailable")
         }
       }
-
-      // Listen for orientation events
       let gotData = false
       const handler = (e: DeviceOrientationEvent) => {
         if (e.alpha !== null) {
-          orientationRef.current = {
-            alpha: e.alpha || 0,
-            beta: e.beta || 0,
-            gamma: e.gamma || 0,
-          }
+          orientationRef.current = { alpha: e.alpha || 0, beta: e.beta || 0, gamma: e.gamma || 0 }
           gotData = true
         }
       }
       window.addEventListener("deviceorientation", handler, true)
-
-      // Wait briefly to see if we get orientation data
-      await new Promise(resolve => setTimeout(resolve, 1000))
-
-      if (gotData) {
-        setOrientationStatus("granted")
-      } else {
-        // No data — might be desktop or sensor unavailable
-        setOrientationStatus("unavailable")
-        setStatusMsg("No compass detected — using fixed north view")
-      }
+      await new Promise(resolve => setTimeout(resolve, 800))
+      setOrientationStatus(gotData ? "granted" : "unavailable")
     } catch {
       setOrientationStatus("unavailable")
     }
 
-    // 3. Camera
+    // 3. Camera (optional)
     setCameraStatus("requesting")
-    setStatusMsg("Requesting camera access...")
-
+    setStatusMsg("Requesting camera...")
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Camera API not available")
+      if (navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+        })
+        if (videoRef.current) videoRef.current.srcObject = stream
+        setCameraStatus("granted")
+      } else {
+        setCameraStatus("unavailable")
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      })
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-      }
-      setCameraStatus("granted")
     } catch {
       setCameraStatus("unavailable")
-      // Camera is optional — continue without it
+    }
+
+    // 4. Ensure catalog is loaded
+    if (catalogStatus !== "granted") {
+      setStatusMsg("Loading star catalog...")
+      const ok = await retryCatalog()
+      if (!ok) return
     }
 
     setStatusMsg("")
     setActive(true)
-  } catch (err: any) {
-    setStatusMsg("")
-    setErrorDetail(`Unexpected error: ${err.message}`)
-  }
-  }, [catalogStatus])
+  }, [catalogStatus, retryCatalog])
 
   // Cleanup on unmount
   useEffect(() => {
