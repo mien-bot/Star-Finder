@@ -93,47 +93,45 @@ export function CameraView({ onClose }: CameraViewProps) {
     }
   }, [])
 
-  // Request permissions — triggered by user tap (must be synchronous user gesture for GPS prompt)
-  const handleStart = useCallback(async () => {
+  // Skip GPS — use manual location or IP-based fallback
+  const handleSkipGPS = useCallback(async () => {
     setErrorDetail(null)
-    setStatusMsg("Requesting location...")
+    setStatusMsg("Getting approximate location...")
     setLocationStatus("requesting")
 
-    // 1. GPS — must happen first, closest to user gesture
+    // Try IP-based geolocation as fallback
     try {
-      if (!navigator.geolocation) throw new Error("Geolocation not supported")
-
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 15000,
-          maximumAge: 0,
-        })
-      })
-      locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
-      setLocationStatus("granted")
-    } catch (err: any) {
-      setLocationStatus("denied")
-      const reasons: Record<number, string> = {
-        1: "Permission denied — tap the lock icon in your browser's address bar to allow location",
-        2: "Position unavailable — could not determine your location",
-        3: "Request timed out — try again",
+      const r = await fetch("https://ipapi.co/json/")
+      if (r.ok) {
+        const data = await r.json()
+        if (data.latitude && data.longitude) {
+          locationRef.current = { lat: data.latitude, lng: data.longitude }
+          setLocationStatus("granted")
+          setStatusMsg(`Approximate location: ${data.city || "unknown"}, ${data.country_name || ""}`)
+          // Continue with rest of setup after a brief pause
+          await continueSetup()
+          return
+        }
       }
-      setErrorDetail(reasons[err?.code] || `Location error: ${err?.message || "unknown"}`)
-      setStatusMsg("")
-      return
-    }
+    } catch {}
 
-    // 2. Device Orientation
+    // Hardcoded fallback — use a default location
+    locationRef.current = { lat: 40.7, lng: -74.0 } // NYC
+    setLocationStatus("granted")
+    setStatusMsg("Using default location (New York)")
+    await continueSetup()
+  }, [])
+
+  // Shared setup logic after location is acquired
+  const continueSetup = useCallback(async () => {
+    // Device Orientation
     setOrientationStatus("requesting")
-    setStatusMsg("Requesting compass...")
+    setStatusMsg("Checking compass...")
     try {
       const DOE = DeviceOrientationEvent as any
       if (typeof DOE.requestPermission === "function") {
         const perm = await DOE.requestPermission()
-        if (perm !== "granted") {
-          setOrientationStatus("unavailable")
-        }
+        if (perm !== "granted") setOrientationStatus("unavailable")
       }
       let gotData = false
       const handler = (e: DeviceOrientationEvent) => {
@@ -149,9 +147,9 @@ export function CameraView({ onClose }: CameraViewProps) {
       setOrientationStatus("unavailable")
     }
 
-    // 3. Camera (optional)
+    // Camera (optional)
     setCameraStatus("requesting")
-    setStatusMsg("Requesting camera...")
+    setStatusMsg("Checking camera...")
     try {
       if (navigator.mediaDevices?.getUserMedia) {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -166,7 +164,7 @@ export function CameraView({ onClose }: CameraViewProps) {
       setCameraStatus("unavailable")
     }
 
-    // 4. Ensure catalog is loaded
+    // Ensure catalog
     if (catalogStatus !== "granted") {
       setStatusMsg("Loading star catalog...")
       const ok = await retryCatalog()
@@ -176,6 +174,40 @@ export function CameraView({ onClose }: CameraViewProps) {
     setStatusMsg("")
     setActive(true)
   }, [catalogStatus, retryCatalog])
+
+  // Request permissions — triggered by user tap
+  const handleStart = useCallback(async () => {
+    setErrorDetail(null)
+    setStatusMsg("Requesting location...")
+    setLocationStatus("requesting")
+
+    // 1. GPS — must happen first, closest to user gesture
+    try {
+      if (!navigator.geolocation) throw new Error("Geolocation not supported")
+
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0,
+        })
+      })
+      locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      setLocationStatus("granted")
+    } catch (err: any) {
+      setLocationStatus("denied")
+      const reasons: Record<number, string> = {
+        1: "Permission denied — tap the lock icon in your browser's address bar to allow location",
+        2: "Position unavailable — could not determine your location",
+        3: "Request timed out — try again",
+      }
+      setErrorDetail(reasons[err?.code] || `Location error: ${err?.message || "unknown"}`)
+      setStatusMsg("GPS failed — use 'Skip GPS' button below for approximate location")
+      return
+    }
+
+    await continueSetup()
+  }, [continueSetup])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -346,6 +378,11 @@ export function CameraView({ onClose }: CameraViewProps) {
             </div>
           )}
 
+          {/* Debug info */}
+          <div className="text-left text-xs text-white/30 mb-4 font-mono">
+            <p>secure: {typeof window !== "undefined" ? String(window.isSecureContext) : "?"} | geo: {typeof navigator !== "undefined" ? String(!!navigator.geolocation) : "?"} | protocol: {typeof window !== "undefined" ? window.location.protocol : "?"}</p>
+          </div>
+
           {/* Permission status list */}
           <div className="space-y-3 text-left text-sm mb-6">
             <div className="flex items-center gap-3 text-white/70">
@@ -390,21 +427,33 @@ export function CameraView({ onClose }: CameraViewProps) {
             </div>
           )}
 
-          <div className="flex gap-3">
-            <Button variant="outline" onClick={onClose} className="flex-1 border-white/20 text-white hover:bg-white/10">
-              Cancel
-            </Button>
-            <Button
-              onClick={handleStart}
-              disabled={locationStatus === "requesting" || orientationStatus === "requesting" || cameraStatus === "requesting"}
-              className="flex-1 bg-primary hover:bg-primary/90"
-            >
-              {locationStatus === "requesting" || orientationStatus === "requesting" ? (
-                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Requesting...</>
-              ) : (
-                <><Play className="w-4 h-4 mr-2" /> Start</>
-              )}
-            </Button>
+          <div className="flex flex-col gap-3">
+            <div className="flex gap-3">
+              <Button variant="outline" onClick={onClose} className="flex-1 border-white/20 text-white hover:bg-white/10">
+                Cancel
+              </Button>
+              <Button
+                onClick={handleStart}
+                disabled={locationStatus === "requesting" || orientationStatus === "requesting" || cameraStatus === "requesting"}
+                className="flex-1 bg-primary hover:bg-primary/90"
+              >
+                {locationStatus === "requesting" || orientationStatus === "requesting" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Requesting...</>
+                ) : (
+                  <><Play className="w-4 h-4 mr-2" /> Start</>
+                )}
+              </Button>
+            </div>
+            {(locationStatus === "denied" || locationStatus === "unavailable") && (
+              <Button
+                onClick={handleSkipGPS}
+                variant="outline"
+                className="w-full border-yellow-500/30 text-yellow-300 hover:bg-yellow-500/10"
+              >
+                <MapPin className="w-4 h-4 mr-2" />
+                Skip GPS — use approximate location
+              </Button>
+            )}
           </div>
         </div>
       </div>
