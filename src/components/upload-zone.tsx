@@ -55,6 +55,7 @@ export function UploadZone({ onImageUpload, onLiveSky }: UploadZoneProps) {
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}
+        onClick={() => fileInputRef.current?.click()}
         className="glass rounded-2xl p-12 w-full max-w-lg cursor-pointer transition-all duration-300 hover:border-primary/50 group"
       >
         <div className="flex flex-col items-center gap-6">
@@ -69,14 +70,14 @@ export function UploadZone({ onImageUpload, onLiveSky }: UploadZoneProps) {
           </div>
           <div className="flex flex-col sm:flex-row gap-3 w-full">
             <Button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
               className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground"
             >
               <Upload className="w-4 h-4 mr-2" />
               Upload Image
             </Button>
             <Button
-              onClick={() => cameraInputRef.current?.click()}
+              onClick={(e) => { e.stopPropagation(); cameraInputRef.current?.click() }}
               variant="outline"
               className="flex-1 border-primary/50 hover:bg-primary/10 text-foreground"
             >
@@ -86,7 +87,7 @@ export function UploadZone({ onImageUpload, onLiveSky }: UploadZoneProps) {
           </div>
           {onLiveSky && (
             <Button
-              onClick={onLiveSky}
+              onClick={(e) => { e.stopPropagation(); onLiveSky!() }}
               variant="outline"
               className="w-full border-primary/50 hover:bg-primary/10 text-foreground"
             >

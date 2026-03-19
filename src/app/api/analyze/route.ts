@@ -211,9 +211,62 @@ export async function POST(request: NextRequest) {
 
     const allCatalogStars = loadStarCatalogSync()
 
-    // Try Astrometry.net first (unless fallback requested)
+    // Try Astrometry.net and GPT-4o in parallel for speed.
+    // Astrometry.net is more accurate but slow; GPT-4o is fast but approximate.
+    // Use whichever finishes successfully first, preferring astrometry if both succeed.
     const apiKey = process.env.ASTROMETRY_API_KEY
-    if (apiKey && !useFallback) {
+    const openaiKey = process.env.OPENAI_API_KEY
+
+    if (apiKey && !useFallback && openaiKey) {
+      // Race both: fast GPT-4o result with slow-but-accurate astrometry
+      const gpt4oPromise = analyzeWithGPT4o(base64Data, imgWidth, imgHeight)
+        .then(result => ({ type: 'gpt4o' as const, result }))
+        .catch(err => { console.error('GPT-4o failed:', err); return null })
+
+      const astrometryPromise = platesolve(apiKey, imageBuffer)
+        .then(result => ({ type: 'astrometry' as const, result }))
+        .catch(err => { console.error('Astrometry.net failed:', err); return null })
+
+      // Wait for GPT-4o first (fast), then check if astrometry finishes quickly too
+      const gpt4oResult = await gpt4oPromise
+
+      // Give astrometry a short window to finish if it's close
+      const astrometryResult = await Promise.race([
+        astrometryPromise,
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 5000)),
+      ])
+
+      // Prefer astrometry if it resolved in time
+      if (astrometryResult?.type === 'astrometry') {
+        const result = astrometryResult.result
+        const projectedStars = projectStarsToImage(allCatalogStars, result.calibration, imgWidth, imgHeight)
+        const constellations = buildConstellations(projectedStars)
+        const canvasStars = toCanvasCoords(constellations, projectedStars, imgWidth, imgHeight)
+
+        const analysisResult: AnalysisResult = {
+          constellations,
+          allStars: canvasStars,
+          calibration: result.calibration,
+          fieldDescription: `Field centered at RA ${result.calibration.ra.toFixed(2)}°, Dec ${result.calibration.dec.toFixed(2)}° with ${result.calibration.radius.toFixed(1)}° field of view`,
+          processingTime: Date.now() - startTime,
+          source: 'astrometry',
+        }
+
+        return NextResponse.json(analysisResult)
+      }
+
+      // Use GPT-4o result
+      if (gpt4oResult) {
+        const fallbackResult = gpt4oResult.result
+        fallbackResult.processingTime = Date.now() - startTime
+        const enhanced = enhanceWithCatalog(fallbackResult, allCatalogStars, imgWidth, imgHeight)
+        enhanced.processingTime = Date.now() - startTime
+        return NextResponse.json(enhanced)
+      }
+
+      // Both failed — fall through to sequential GPT-4o attempt below
+    } else if (apiKey && !useFallback) {
+      // No OpenAI key — try astrometry only
       try {
         const result = await platesolve(apiKey, imageBuffer)
 
@@ -236,7 +289,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // GPT-4o fallback
+    // GPT-4o fallback (sequential — either no astrometry key, or parallel both failed)
     const fallbackResult = await analyzeWithGPT4o(base64Data, imgWidth, imgHeight)
     fallbackResult.processingTime = Date.now() - startTime
 

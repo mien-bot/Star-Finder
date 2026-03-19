@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { StarBackground } from "@/components/star-background"
 import { UploadZone } from "@/components/upload-zone"
 import { CanvasOverlay } from "@/components/canvas-overlay"
@@ -44,6 +44,7 @@ export default function StarFinderApp() {
     setImageUrl(url)
     setAppState("loading")
     setErrorMessage(null)
+    handledRef.current = false
 
     try {
       // Try real API first
@@ -54,27 +55,31 @@ export default function StarFinderApp() {
   }, [analysis])
 
   // Watch for analysis completion
-  const prevStatus = analysis.status
-  if (prevStatus === 'complete' && analysis.result && appState === 'loading') {
-    // Convert analysis result constellations to the UI format
-    const uiConstellations: Constellation[] = analysis.result.constellations.map(c => ({
-      name: c.name,
-      stars: c.stars.map(s => [s.px || 0, s.py || 0, s.mag] as [number, number, number]),
-      connections: c.connections,
-      description: c.description,
-      mythology: c.mythology,
-      visibility: c.visibility,
-    }))
-    setConstellations(uiConstellations)
-    setAppState("results")
-  } else if (prevStatus === 'error' && appState === 'loading') {
-    // Fall back to mock data on error
-    setErrorMessage(analysis.error || 'Analysis failed')
-    analyzeNightSkyImage().then(result => {
-      setConstellations(result.constellations)
+  const handledRef = useRef(false)
+  useEffect(() => {
+    if (appState !== 'loading' || handledRef.current) return
+
+    if (analysis.status === 'complete' && analysis.result) {
+      handledRef.current = true
+      const uiConstellations: Constellation[] = analysis.result.constellations.map(c => ({
+        name: c.name,
+        stars: c.stars.map(s => [s.px || 0, s.py || 0, s.mag] as [number, number, number]),
+        connections: c.connections,
+        description: c.description,
+        mythology: c.mythology,
+        visibility: c.visibility,
+      }))
+      setConstellations(uiConstellations)
       setAppState("results")
-    })
-  }
+    } else if (analysis.status === 'error') {
+      handledRef.current = true
+      setErrorMessage(analysis.error || 'Analysis failed')
+      analyzeNightSkyImage().then(result => {
+        setConstellations(result.constellations)
+        setAppState("results")
+      })
+    }
+  }, [analysis.status, analysis.result, analysis.error, appState])
 
   const handleReset = useCallback(() => {
     setAppState("upload")
