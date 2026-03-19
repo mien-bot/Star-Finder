@@ -23,21 +23,36 @@ export function useAnalysis(): UseAnalysisReturn {
   const [currentImage, setCurrentImage] = useState<string | null>(null)
   const [imageDims, setImageDims] = useState({ width: 1000, height: 1000 })
 
-  const fileToBase64 = (file: File): Promise<string> => {
+  // Resize image to max dimension and return as base64 data URL + dimensions
+  const MAX_DIMENSION = 2000
+  const resizeImage = (file: File): Promise<{ dataUrl: string; width: number; height: number }> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onload = () => resolve(reader.result as string)
       reader.onerror = reject
-      reader.readAsDataURL(file)
-    })
-  }
+      reader.onload = () => {
+        const img = new Image()
+        img.onerror = () => reject(new Error('Failed to load image'))
+        img.onload = () => {
+          let { width, height } = img
 
-  const getImageDimensions = (dataUrl: string): Promise<{ width: number; height: number }> => {
-    return new Promise((resolve) => {
-      const img = new Image()
-      img.onload = () => resolve({ width: img.width, height: img.height })
-      img.onerror = () => resolve({ width: 1000, height: 1000 })
-      img.src = dataUrl
+          // Downscale if needed
+          if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+            const scale = MAX_DIMENSION / Math.max(width, height)
+            width = Math.round(width * scale)
+            height = Math.round(height * scale)
+          }
+
+          const canvas = document.createElement('canvas')
+          canvas.width = width
+          canvas.height = height
+          const ctx = canvas.getContext('2d')!
+          ctx.drawImage(img, 0, 0, width, height)
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+          resolve({ dataUrl, width, height })
+        }
+        img.src = reader.result as string
+      }
+      reader.readAsDataURL(file)
     })
   }
 
@@ -48,10 +63,10 @@ export function useAnalysis(): UseAnalysisReturn {
       setError(null)
       setResult(null)
 
-      const base64 = await fileToBase64(file)
-      setCurrentImage(base64)
+      const { dataUrl, width, height } = await resizeImage(file)
+      setCurrentImage(dataUrl)
 
-      const dims = await getImageDimensions(base64)
+      const dims = { width, height }
       setImageDims(dims)
 
       setStatus('plate-solving')
@@ -62,7 +77,7 @@ export function useAnalysis(): UseAnalysisReturn {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image: base64,
+          image: dataUrl,
           width: dims.width,
           height: dims.height,
         }),
