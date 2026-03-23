@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { localSiderealTime, raDecToAltAz, projectToCamera } from "@/lib/celestial"
 import { constellationLines, constellationNames } from "@/lib/constellation-lines"
-import { X, Compass, MapPin, Camera, Play, AlertTriangle, Loader2 } from "lucide-react"
+import { X, Compass, MapPin, Camera, Play, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
 interface CatalogStar {
@@ -35,6 +35,8 @@ export function CameraView({ onClose }: CameraViewProps) {
   const locationRef = useRef<{ lat: number; lng: number } | null>(null)
   const orientationRef = useRef({ alpha: 0, beta: 90, gamma: 0 })
   const animFrameRef = useRef<number>(0)
+  const streamRef = useRef<MediaStream | null>(null)
+  const orientationCleanupRef = useRef<(() => void) | null>(null)
 
   const [active, setActive] = useState(false)
   const [catalogOk, setCatalogOk] = useState(false)
@@ -61,11 +63,37 @@ export function CameraView({ onClose }: CameraViewProps) {
       })
   }, [])
 
+  // Attach camera stream to video element once the active view renders
+  useEffect(() => {
+    if (active && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current
+      // Explicit play() — autoPlay alone is unreliable on mobile browsers
+      videoRef.current.play().catch(() => {})
+    }
+  }, [active])
+
+  // Request device orientation permission — MUST be called within user gesture (iOS requirement)
+  async function requestOrientationPermission(): Promise<boolean> {
+    try {
+      const DOE = DeviceOrientationEvent as any
+      if (typeof DOE.requestPermission === "function") {
+        const permission = await DOE.requestPermission()
+        return permission === "granted"
+      }
+      return true // No permission API = assume available
+    } catch {
+      return false
+    }
+  }
+
   // Start with GPS
   async function handleStart() {
     setError(null)
-    setStatus("Requesting GPS location...")
 
+    // Request orientation permission FIRST while user gesture context is still active (iOS)
+    const orientOk = await requestOrientationPermission()
+
+    setStatus("Requesting GPS location...")
     try {
       if (!navigator.geolocation) throw new Error("Geolocation not supported by this browser")
 
@@ -85,14 +113,17 @@ export function CameraView({ onClose }: CameraViewProps) {
       return
     }
 
-    await finishSetup()
+    await finishSetup(orientOk)
   }
 
   // Start without GPS — use IP geolocation
   async function handleSkipGPS() {
     setError(null)
-    setStatus("Getting approximate location...")
 
+    // Request orientation permission FIRST while user gesture context is still active (iOS)
+    const orientOk = await requestOrientationPermission()
+
+    setStatus("Getting approximate location...")
     try {
       const r = await fetch("https://ipapi.co/json/")
       if (!r.ok) throw new Error("IP lookup failed")
@@ -104,42 +135,68 @@ export function CameraView({ onClose }: CameraViewProps) {
         throw new Error("No coordinates returned")
       }
     } catch {
-      // Fallback to a default
       locationRef.current = { lat: 40.7, lng: -74.0 }
       setStatus("Using default location")
     }
 
-    await finishSetup()
+    await finishSetup(orientOk)
   }
 
-  async function finishSetup() {
-    // Compass
+  async function finishSetup(orientPermission: boolean) {
+    // Compass — set up orientation listener with proper compass heading
     setStatus("Checking compass...")
-    try {
-      const DOE = DeviceOrientationEvent as any
-      if (typeof DOE.requestPermission === "function") {
-        await DOE.requestPermission()
-      }
-      let got = false
-      const handler = (e: DeviceOrientationEvent) => {
-        if (e.alpha !== null) {
-          orientationRef.current = { alpha: e.alpha || 0, beta: e.beta || 0, gamma: e.gamma || 0 }
-          got = true
+    let compassAvailable = false
+
+    if (orientPermission) {
+      const handler = (e: any) => {
+        // iOS: webkitCompassHeading is CW from north (standard compass heading, 0-360)
+        // Standard/Android: alpha is CCW from north, convert to CW azimuth
+        let heading: number | null = null
+        if (e.webkitCompassHeading != null && e.webkitCompassHeading >= 0) {
+          heading = e.webkitCompassHeading
+        } else if (e.alpha != null) {
+          heading = (360 - e.alpha) % 360
+        }
+
+        if (heading !== null) {
+          orientationRef.current = {
+            alpha: heading,
+            beta: e.beta ?? 90,
+            gamma: e.gamma ?? 0,
+          }
+          compassAvailable = true
         }
       }
-      window.addEventListener("deviceorientation", handler, true)
-      await new Promise(r => setTimeout(r, 800))
-      setHasCompass(got)
-    } catch { /* compass optional */ }
 
-    // Camera
+      // Prefer deviceorientationabsolute (Android Chrome) for true compass heading
+      // Falls back to deviceorientation (iOS, other browsers)
+      let useAbsolute = false
+      if ("ondeviceorientationabsolute" in window) {
+        await new Promise<void>(resolve => {
+          const test = () => { useAbsolute = true; resolve() }
+          window.addEventListener("deviceorientationabsolute", test, { once: true })
+          setTimeout(() => resolve(), 500)
+        })
+      }
+
+      const eventName = useAbsolute ? "deviceorientationabsolute" : "deviceorientation"
+      window.addEventListener(eventName, handler as EventListener)
+      orientationCleanupRef.current = () => window.removeEventListener(eventName, handler as EventListener)
+
+      // Wait for sensor data to arrive
+      await new Promise(r => setTimeout(r, 800))
+    }
+
+    setHasCompass(compassAvailable)
+
+    // Camera — store stream in ref; it will be attached when active view renders
     setStatus("Checking camera...")
     try {
       if (navigator.mediaDevices?.getUserMedia) {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
         })
-        if (videoRef.current) videoRef.current.srcObject = stream
+        streamRef.current = stream
         setHasCamera(true)
       }
     } catch { /* camera optional */ }
@@ -165,8 +222,11 @@ export function CameraView({ onClose }: CameraViewProps) {
   // Cleanup
   useEffect(() => {
     return () => {
-      if (videoRef.current?.srcObject) {
-        (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop())
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
+      }
+      if (orientationCleanupRef.current) {
+        orientationCleanupRef.current()
       }
       cancelAnimationFrame(animFrameRef.current)
     }

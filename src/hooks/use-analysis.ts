@@ -24,8 +24,12 @@ export function useAnalysis(): UseAnalysisReturn {
   const [imageDims, setImageDims] = useState({ width: 1000, height: 1000 })
 
   // Resize image to max dimension and return as base64 data URL + dimensions
-  const MAX_DIMENSION = 2000
+  // Use smaller dimensions and lower quality on mobile for faster, more reliable uploads
   const resizeImage = (file: File): Promise<{ dataUrl: string; width: number; height: number }> => {
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+    const maxDim = isMobile ? 1500 : 2000
+    const quality = isMobile ? 0.75 : 0.85
+
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
       reader.onerror = reject
@@ -36,8 +40,8 @@ export function useAnalysis(): UseAnalysisReturn {
           let { width, height } = img
 
           // Downscale if needed
-          if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-            const scale = MAX_DIMENSION / Math.max(width, height)
+          if (width > maxDim || height > maxDim) {
+            const scale = maxDim / Math.max(width, height)
             width = Math.round(width * scale)
             height = Math.round(height * scale)
           }
@@ -47,7 +51,7 @@ export function useAnalysis(): UseAnalysisReturn {
           canvas.height = height
           const ctx = canvas.getContext('2d')!
           ctx.drawImage(img, 0, 0, width, height)
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+          const dataUrl = canvas.toDataURL('image/jpeg', quality)
           resolve({ dataUrl, width, height })
         }
         img.src = reader.result as string
