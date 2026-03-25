@@ -11,6 +11,23 @@ interface SimbadResult {
   references?: number
 }
 
+// Validate and sanitize a star name to prevent ADQL injection
+function sanitizeStarName(name: string): string | null {
+  // Allow only alphanumeric, spaces, hyphens, plus signs, periods, and Greek letters
+  const cleaned = name.trim().slice(0, 100)
+  if (!/^[a-zA-Z0-9\s\-+.*αβγδεζηθικλμνξοπρστυφχψω]+$/.test(cleaned)) {
+    return null
+  }
+  return cleaned.replace(/'/g, "''")
+}
+
+// Validate a numeric coordinate parameter
+function validateNumeric(value: string, min: number, max: number): number | null {
+  const num = parseFloat(value)
+  if (isNaN(num) || num < min || num > max) return null
+  return num
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const ra = searchParams.get('ra')
@@ -22,8 +39,12 @@ export async function GET(request: NextRequest) {
     let simbadData: SimbadResult | null = null
 
     if (name) {
-      // Query by name
-      const query = encodeURIComponent(`SELECT main_id, otype_txt, sp_type, plx_value, rvz_radvel FROM basic WHERE main_id = '${name.replace(/'/g, "''")}'`)
+      const safeName = sanitizeStarName(name)
+      if (!safeName) {
+        return NextResponse.json({ error: 'Invalid star name' }, { status: 400 })
+      }
+      // Query by name using parameterized-style safe string
+      const query = encodeURIComponent(`SELECT main_id, otype_txt, sp_type, plx_value, rvz_radvel FROM basic WHERE main_id = '${safeName}'`)
       const url = `https://simbad.cds.unistra.fr/simbad/sim-tap/sync?request=doQuery&lang=adql&format=json&query=${query}`
 
       const res = await fetch(url)
@@ -40,8 +61,15 @@ export async function GET(request: NextRequest) {
         }
       }
     } else if (ra && dec) {
+      // Validate numeric coordinates
+      const safeRA = validateNumeric(ra, 0, 360)
+      const safeDec = validateNumeric(dec, -90, 90)
+      const safeRadius = validateNumeric(radius, 0.1, 60)
+      if (safeRA === null || safeDec === null || safeRadius === null) {
+        return NextResponse.json({ error: 'Invalid coordinates or radius' }, { status: 400 })
+      }
       // Cone search by coordinates
-      const url = `https://simbad.cds.unistra.fr/simbad/sim-coo?Coord=${ra}+${dec}&CooFrame=FK5&CooEpoch=2000&CooEqui=2000&CooDefinedFrames=none&Radius=${radius}&Radius.unit=arcsec&submit=submit+query&output.format=JSON`
+      const url = `https://simbad.cds.unistra.fr/simbad/sim-coo?Coord=${safeRA}+${safeDec}&CooFrame=FK5&CooEpoch=2000&CooEqui=2000&CooDefinedFrames=none&Radius=${safeRadius}&Radius.unit=arcsec&submit=submit+query&output.format=JSON`
 
       const res = await fetch(url)
       if (res.ok) {

@@ -203,8 +203,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No image provided' }, { status: 400 })
     }
 
-    // Decode base64 image
+    // Decode base64 image with size limit (20MB max)
     const base64Data = image.replace(/^data:image\/\w+;base64,/, '')
+    if (base64Data.length > 20 * 1024 * 1024 * 1.37) { // ~20MB after base64 encoding overhead
+      return NextResponse.json({ error: 'Image too large (max 20MB)' }, { status: 413 })
+    }
     const imageBuffer = Buffer.from(base64Data, 'base64')
     const imgWidth = width || 1000
     const imgHeight = height || 1000
